@@ -26,7 +26,7 @@ function WorldsPanel({ onLoad, onClose }: WorldsPanelProps) {
     <div style={{
       position: 'absolute',
       top: 52,
-      right: 0,
+      right: 70,
       width: 300,
       height: 'calc(100vh - 52px)',
       background: 'white',

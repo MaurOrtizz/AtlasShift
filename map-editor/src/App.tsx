@@ -23,8 +23,59 @@ interface CountryData {
 
 type VertexFeature = NonNullable<MapLayerMouseEvent['features']>[number];
 
+const SEA_FEATURE_TYPE = 'sea';
+
+function isSeaFeature(feature: Feature): boolean {
+  return feature.properties?.featureType === SEA_FEATURE_TYPE;
+}
+
+function splitSeaFeatures(collection: FeatureCollection): {
+  land: FeatureCollection;
+  sea: Feature[];
+} {
+  const land: Feature[] = [];
+  const sea: Feature[] = [];
+  for (const feature of collection.features) {
+    if (isSeaFeature(feature)) {
+      sea.push(feature);
+    } else {
+      land.push(feature);
+    }
+  }
+  return { land: { ...collection, features: land }, sea };
+}
+
+function clipGeometryToLand(
+  geometry: Polygon | MultiPolygon,
+  seaPolygons: Feature[]
+): Polygon | MultiPolygon | null {
+  if (seaPolygons.length === 0) return geometry;
+
+  let current: Feature<Polygon | MultiPolygon> = {
+    type: 'Feature',
+    properties: {},
+    geometry
+  };
+
+  for (const sea of seaPolygons) {
+    if (!sea.geometry) continue;
+    try {
+      const result = turf.difference(
+        turf.featureCollection([current, sea as Feature<Polygon | MultiPolygon>])
+      );
+      if (!result) return null;
+      current = result;
+    } catch {
+      continue;
+    }
+  }
+
+  return current.geometry;
+}
+
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
-const defaultCountriesData = JSON.parse(countriesRaw) as FeatureCollection;
+const defaultCountriesDataRaw = JSON.parse(countriesRaw) as FeatureCollection;
+const { land: defaultCountriesData, sea: defaultSeaPolygons } = splitSeaFeatures(defaultCountriesDataRaw);
 
 function bboxesOverlap(a: number[], b: number[]) {
   return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
@@ -101,6 +152,7 @@ function downloadJSON(data: unknown, filename: string) {
 
 function App() {
   const [countriesData, setCountriesData] = useState<FeatureCollection>(defaultCountriesData);
+  const [seaPolygons, setSeaPolygons] = useState<Feature[]>(defaultSeaPolygons);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const isFirstRender = useRef(true);
 
@@ -298,7 +350,7 @@ function App() {
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits, seaPolygons]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
@@ -309,10 +361,17 @@ function App() {
       const name = prompt('Name your new country:');
       if (!name) return;
 
-      const newGeometry = {
+      const rawGeometry = {
         type: 'Polygon' as const,
         coordinates: [[...newCountryPoints, newCountryPoints[0]]]
       };
+
+      const clipped = clipGeometryToLand(rawGeometry, seaPolygons);
+      if (!clipped) {
+        alert('This polygon is entirely inside the sea and cannot be created.');
+        return;
+      }
+      const newGeometry = clipped;
 
       const updatedEdits = { ...countryEdits };
 
@@ -391,7 +450,7 @@ function App() {
         [name]: geometry
       }));
     }
-  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping]);
+  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
@@ -545,7 +604,10 @@ function App() {
       }))
     };
 
-    setCountriesData(normalized);
+    const { land, sea } = splitSeaFeatures(normalized);
+
+    setCountriesData(land);
+    setSeaPolygons(sea);
     setCountryEdits({});
     setEditedGeometries({});
     setSelectedCountry(null);
@@ -572,6 +634,18 @@ function App() {
       const basePolygon = turf.feature(baseGeometry as Polygon | MultiPolygon);
       const unioned = turf.union(turf.featureCollection([basePolygon, drawnPolygon]));
       if (unioned) geometry = unioned.geometry;
+    }
+
+    if (geometry) {
+      const clipped = clipGeometryToLand(geometry as Polygon | MultiPolygon, seaPolygons);
+      if (!clipped) {
+        alert('This edit would leave the country entirely inside the sea and was discarded.');
+        setEditingCountry(null);
+        setEditMode(null);
+        setDrawingPoints([]);
+        return;
+      }
+      geometry = clipped;
     }
 
     if (geometry) {
@@ -642,7 +716,7 @@ function App() {
     setEditingCountry(null);
     setEditMode(null);
     setDrawingPoints([]);
-  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping, seaPolygons]);
 
   const modifiedGeoJSON = useMemo(() => ({
     ...countriesData,
@@ -658,7 +732,6 @@ function App() {
         const edit = countryEdits[name];
         return {
           ...feature,
-          id: name,
           geometry: edit?.geometry ?? feature.geometry,
           properties: {
             ...feature.properties,
@@ -798,7 +871,6 @@ function App() {
       ...modifiedGeoJSON.features,
       ...newCountries.map(([name, data]) => ({
         type: 'Feature' as const,
-        id: name,
         properties: { name, ...(data.properties || {}), customColor: data.color },
         geometry: data.geometry as Geometry
       }))
@@ -845,11 +917,9 @@ function App() {
       return;
     }
 
-    const feature = e.features?.find((f) => f.layer?.id === 'countries-fill');
+    const feature = e.features?.[0];
     if (!draggingVertex || !editingCountry) {
-      const nextHovered = feature ? feature.properties?.name : null;
-      if (nextHovered === hoveredCountry) return;
-      setHoveredCountry(nextHovered);
+      setHoveredCountry(feature ? feature.properties?.name : null);
       return;
     }
 
@@ -878,7 +948,7 @@ function App() {
       );
       return { ...prev, [editingCountry]: updated };
     });
-  }, [draggingVertex, editingCountry]);
+  }, [draggingVertex, editingCountry, seaPolygons]);
 
   const onMouseUp = useCallback(() => {
     setDraggingVertex(null);

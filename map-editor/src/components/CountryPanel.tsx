@@ -46,7 +46,7 @@ function CountryPanel({ countryName, data, onChange, onClose, editingCountry, ed
     <div style={{
       position: 'absolute',
       top: 52,
-      right: 0,
+      right: 70,
       width: 300,
       height: 'fit-content',
       maxHeight: 'calc(100vh - 52px)',
