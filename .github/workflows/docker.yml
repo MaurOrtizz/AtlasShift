@@ -22,18 +22,18 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: map-editor/package-lock.json
+          cache-dependency-path: atlasshift/package-lock.json
 
       - name: Install dependencies
-        working-directory: map-editor
+        working-directory: atlasshift
         run: npm ci
 
       - name: Lint
-        working-directory: map-editor
+        working-directory: atlasshift
         run: npm run lint
 
       - name: Type-check and build
-        working-directory: map-editor
+        working-directory: atlasshift
         run: npm run build
 
       - name: Set up Docker Buildx
@@ -50,9 +50,9 @@ jobs:
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
         with:
-          context: ./map-editor
+          context: ./atlasshift
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-frontend:latest
+          tags: ghcr.io/${{ env.REPO_OWNER }}/atlasshift-frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -91,6 +91,6 @@ jobs:
         with:
           context: ./server
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-backend:latest
+          tags: ghcr.io/${{ env.REPO_OWNER }}/atlasshift-backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

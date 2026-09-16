@@ -2,7 +2,7 @@ from sqlmodel import SQLModel, Field, create_engine, Session
 from typing import Optional
 import json
 
-DATABASE_URL = "sqlite:///mapeditor.db"
+DATABASE_URL = "sqlite:///atlasshift.db"
 engine = create_engine(DATABASE_URL)
 
 class World(SQLModel, table=True):

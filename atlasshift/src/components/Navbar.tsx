@@ -21,7 +21,7 @@ function Navbar({ onSave, onMyWorlds, allowOverlapping, onToggleOverlapping }: N
       zIndex: 20,
     }}>
       <span style={{ color: 'white', fontFamily: 'sans-serif', fontWeight: 600, fontSize: 16 }}>
-        Map Editor
+        AtlasShift
       </span>
       <div style={{ display: 'flex', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

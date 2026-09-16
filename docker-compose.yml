@@ -1,3 +1,5 @@
+name: atlasshift
+
 services:
   backend:
     build:
@@ -9,17 +11,17 @@ services:
       - ./server:/app
     environment:
       - ALLOWED_ORIGINS=http://localhost:5173
-      - DATABASE_URL=sqlite:///mapeditor.db
+      - DATABASE_URL=sqlite:///atlasshift.db
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
     build:
-      context: ./map-editor
+      context: ./atlasshift
       dockerfile: Dockerfile.dev
     ports:
       - "5173:5173"
     volumes:
-      - ./map-editor:/app
+      - ./atlasshift:/app
       - /app/node_modules
     environment:
       - VITE_API_URL=http://localhost:8000

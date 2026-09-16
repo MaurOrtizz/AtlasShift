@@ -5,7 +5,7 @@ from database import World, create_db, get_session
 from pydantic import BaseModel
 import json
 
-app = FastAPI()
+app = FastAPI(title="AtlasShift API", description="API for saving and managing AtlasShift worlds.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +23,7 @@ class WorldPayload(BaseModel):
 
 @app.get("/")
 def root():
-    return {"message": "MapEditor API running"}
+    return {"message": "AtlasShift API running"}
 
 @app.post("/worlds")
 def create_world(payload: WorldPayload, session: Session = Depends(get_session)):

@@ -1,8 +1,8 @@
 venv/
 node_modules/
-map-editor/.vite/
-map-editor/node_modules/
-map-editor/dist/
+atlasshift/.vite/
+atlasshift/node_modules/
+atlasshift/dist/
 __pycache__/
 *.pyc
 *.env
