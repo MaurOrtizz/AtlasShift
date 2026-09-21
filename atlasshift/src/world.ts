@@ -7,13 +7,22 @@ export interface CountryData {
   properties?: GeoJsonProperties;
 }
 
+export interface SubdivisionData {
+  parent_id: string;
+  name: string;
+  color: string;
+  geometry: Geometry;
+  properties?: GeoJsonProperties;
+}
+
 export type BackgroundBounds = [[number, number], [number, number], [number, number], [number, number]];
 
 export interface WorldData {
   id?: number;
   name: string;
   edits: Record<string, CountryData>;
-  schema_version?: 0 | 1 | 2;
+  subdivisions?: Record<string, SubdivisionData>;
+  schema_version?: 0 | 1 | 2 | 3;
   base_map?: FeatureCollection | null;
   background_image?: string | null;
   background_bounds?: BackgroundBounds | null;
@@ -21,15 +30,24 @@ export interface WorldData {
 }
 
 export type ProjectState = Required<Pick<WorldData,
-  'edits' | 'base_map' | 'background_image' | 'background_bounds' | 'allow_overlapping'
+  'edits' | 'subdivisions' | 'base_map' | 'background_image' | 'background_bounds' | 'allow_overlapping'
 >>;
 
 export function worldPayload(name: string, state: ProjectState): WorldData {
   if (Object.values(state.edits).some(edit => typeof edit.name !== 'string' || !edit.name.trim())) {
     throw new Error('Every country needs a non-empty name before saving.');
   }
+  for (const [id, subdivision] of Object.entries(state.subdivisions)) {
+    if (!validTerritoryId(id) || !validTerritoryId(subdivision.parent_id)) {
+      throw new Error('Every subdivision needs valid stable IDs before saving.');
+    }
+    if (typeof subdivision.name !== 'string' || !subdivision.name.trim()) {
+      throw new Error('Every subdivision needs a non-empty name before saving.');
+    }
+    validateTerritoryGeometry(subdivision.geometry);
+  }
   // Missing geometry means unchanged; explicit null means deleted. Never coalesce them.
-  return { ...state, name, schema_version: 2 };
+  return { ...state, name, schema_version: 3 };
 }
 
 export function projectChanged(current: ProjectState, saved: ProjectState): boolean {
@@ -38,6 +56,13 @@ export function projectChanged(current: ProjectState, saved: ProjectState): bool
 
 export function validTerritoryId(id: unknown): id is string {
   return typeof id === 'string' && id.trim().length > 0 && id !== 'prototype' && !Object.hasOwn(Object.prototype, id);
+}
+
+function validateTerritoryGeometry(geometry: Geometry): void {
+  normalizeBaseMap({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', id: 'geometry-check', properties: { name: 'Geometry check' }, geometry }],
+  }, true);
 }
 
 // Normalize IDs once at the import boundary. Names are labels, never identity.
@@ -119,13 +144,13 @@ export function exportMap(base: FeatureCollection, edits: Record<string, Country
 }
 
 export function restoreWorld(world: WorldData, defaultMap: FeatureCollection): ProjectState {
-  if (world.schema_version !== undefined && ![0, 1, 2].includes(world.schema_version)) {
+  if (world.schema_version !== undefined && ![0, 1, 2, 3].includes(world.schema_version)) {
     throw new Error('This world was created with an unsupported project version.');
   }
-  if ((world.schema_version === 1 || world.schema_version === 2) && !world.base_map) {
+  if ((world.schema_version === 1 || world.schema_version === 2 || world.schema_version === 3) && !world.base_map) {
     throw new Error('This world is missing its base map.');
   }
-  const legacy = world.schema_version !== 2;
+  const legacy = (world.schema_version ?? 0) < 2;
   const base = legacy ? normalizeLegacyMap(world.base_map ?? defaultMap) : normalizeBaseMap(world.base_map, true);
   if (!world.edits || typeof world.edits !== 'object' || Array.isArray(world.edits)) {
     throw new Error('This world has invalid territory edits.');
@@ -159,8 +184,29 @@ export function restoreWorld(world: WorldData, defaultMap: FeatureCollection): P
   for (const [id, edit] of Object.entries(edits)) {
     if (!baseIds.has(id) && edit.geometry === undefined) throw new Error('A new territory is missing its geometry.');
   }
+  const subdivisions: Record<string, SubdivisionData> = {};
+  if ((world.schema_version ?? 0) >= 3) {
+    if (!world.subdivisions || typeof world.subdivisions !== 'object' || Array.isArray(world.subdivisions)) {
+      throw new Error('This world has invalid subdivision edits.');
+    }
+    for (const [id, subdivision] of Object.entries(world.subdivisions)) {
+      if (!validTerritoryId(id) || !subdivision || typeof subdivision !== 'object' || Array.isArray(subdivision) ||
+          !validTerritoryId(subdivision.parent_id) || typeof subdivision.name !== 'string' || !subdivision.name.trim() ||
+          typeof subdivision.color !== 'string') {
+        throw new Error('Invalid subdivision ID, parent, name, or color.');
+      }
+      const parent = edits[subdivision.parent_id];
+      const parentExists = baseIds.has(subdivision.parent_id) || Boolean(parent?.geometry);
+      if (!parentExists || parent?.geometry === null) {
+        throw new Error('A subdivision references a missing or deleted country.');
+      }
+      validateTerritoryGeometry(subdivision.geometry);
+      subdivisions[id] = subdivision;
+    }
+  }
   return {
     edits,
+    subdivisions,
     base_map: base,
     background_image: world.background_image ?? null,
     background_bounds: world.background_bounds ?? null,

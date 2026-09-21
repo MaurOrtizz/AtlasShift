@@ -2,9 +2,9 @@
 
 This directory contains the web interface for AtlasShift, an interactive political map editor for building alternate worlds. It uses React and TypeScript for the interface, MapLibre GL to render the map, and Turf.js to modify territory geometries.
 
-The editor lets users customize countries, redraw borders, create or absorb territories, and import or export GeoJSON. The **My Worlds** panel communicates with the FastAPI backend to manage saved scenarios.
+The editor lets users customize countries, redraw borders, create or absorb territories, draw subdivisions inside parent countries, and import or export country GeoJSON. The **My Worlds** panel communicates with the FastAPI backend to manage saved scenarios.
 
-Countries use stable GeoJSON feature IDs independently of their display names. `src/world.ts` handles ID assignment, legacy-save conversion, version 2 snapshots, and GeoJSON export. The same IDs drive selection and geometry editing, so duplicate names remain independent. This is the foundation for future country subdivisions; parent relationships and subdivision tools are still planned.
+Countries use stable GeoJSON feature IDs independently of their display names. Subdivisions use their own stable IDs and store a `parent_id` that links them back to the country they belong to. `src/world.ts` handles ID assignment, legacy-save conversion, version 3 snapshots, subdivision validation, and GeoJSON export. The same IDs drive selection and geometry editing, so duplicate country names remain independent.
 
 See the [main README](../README.md) for the complete project overview, backend setup, Docker instructions, usage guide, limitations, and roadmap.
 
@@ -35,7 +35,7 @@ Open [http://localhost:5173](http://localhost:5173). Restart the development ser
 ## Commands
 
 - `npm run lint` checks the source code with ESLint.
-- `npm test` runs regression tests for editor state, persistence, GeoJSON exchange, and HTTP errors using Node's built-in test runner.
+- `npm test` runs regression tests for editor state, persistence, GeoJSON exchange, subdivision workflows, and HTTP errors using Node's built-in test runner.
 - `npm run build` type-checks the project and creates a production build in `dist/`.
 - `npm run preview` serves the production build locally. The backend must be started separately, and CORS must allow the preview origin.
 

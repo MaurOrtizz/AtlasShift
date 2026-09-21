@@ -89,7 +89,7 @@ class WorldAPITests(unittest.TestCase):
         self.assertEqual(self.request("GET", path)[1]["base_map"], self.project()["base_map"])
 
     def test_invalid_version_map_and_name_are_rejected(self):
-        for changes in [{"schema_version": 3}, {"base_map": None}, {"base_map": {}}, {"name": "  "}]:
+        for changes in [{"schema_version": 4}, {"base_map": None}, {"base_map": {}}, {"name": "  "}]:
             with self.subTest(changes=changes):
                 self.assertEqual(self.request("POST", "/worlds", {**self.project(), **changes})[0], 422)
 
@@ -128,6 +128,47 @@ class WorldAPITests(unittest.TestCase):
                 self.assertEqual(self.request("PUT", path, old)[0], 409)
                 loaded = self.request("GET", path)[1]
                 self.assertEqual({key: loaded[key] for key in upgraded}, upgraded)
+
+    def test_version_3_subdivisions_round_trip_and_block_downgrades(self):
+        payload = self.stable_project()
+        payload["schema_version"] = 3
+        payload["subdivisions"] = {
+            "subdivision-a": {
+                "parent_id": "country-a",
+                "name": "North",
+                "color": "#7dd3fc",
+                "geometry": payload["base_map"]["features"][0]["geometry"],
+            }
+        }
+        status, created = self.request("POST", "/worlds", payload)
+        self.assertEqual(status, 200)
+        path = f'/worlds/{created["id"]}'
+        self.assertEqual({key: created[key] for key in payload}, payload)
+        self.assertEqual(self.request("PUT", path, self.stable_project())[0], 409)
+        self.assertEqual(self.request("GET", path)[1]["subdivisions"], payload["subdivisions"])
+
+    def test_version_3_rejects_invalid_subdivisions(self):
+        _, created = self.request("POST", "/worlds", self.stable_project())
+        path = f'/worlds/{created["id"]}'
+        good = self.stable_project()
+        good["schema_version"] = 3
+        good["subdivisions"] = {
+            "subdivision-a": {
+                "parent_id": "country-a",
+                "name": "North",
+                "color": "#7dd3fc",
+                "geometry": good["base_map"]["features"][0]["geometry"],
+            }
+        }
+        for changes in [
+            {"subdivision-a": {**good["subdivisions"]["subdivision-a"], "parent_id": "missing"}},
+            {"subdivision-a": {**good["subdivisions"]["subdivision-a"], "name": ""}},
+            {"subdivision-a": {**good["subdivisions"]["subdivision-a"], "geometry": None}},
+            {"__proto__": good["subdivisions"]["subdivision-a"]},
+        ]:
+            payload = {**good, "subdivisions": changes}
+            with self.subTest(changes=changes):
+                self.assertEqual(self.request("PUT", path, payload)[0], 422)
 
     def test_version_2_rejects_invalid_ids_geometry_and_edits_without_changing_saved_world(self):
         _, created = self.request("POST", "/worlds", self.stable_project())

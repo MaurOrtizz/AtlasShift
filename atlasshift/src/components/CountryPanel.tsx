@@ -16,6 +16,10 @@ interface CountryPanelProps {
   onSetEditMode: (mode: 'vertices' | 'draw' | null) => void;
   onDoneEditing: () => void;
   isAbsorbing: boolean;
+  subdivisionCount: number;
+  isAddingSubdivision: boolean;
+  onStartSubdivision: () => void;
+  onCancelSubdivision: () => void;
   onStartAbsorb: () => void;
   onCancelAbsorb: () => void;
   onDeleteCountry: () => void;
@@ -33,7 +37,25 @@ const buttonStyle = (bg: string) => ({
 });
 
 
-function CountryPanel({ countryId, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing, isAbsorbing, onStartAbsorb, onCancelAbsorb, onDeleteCountry }: CountryPanelProps) {
+function CountryPanel({
+  countryId,
+  data,
+  onChange,
+  onClose,
+  editingCountry,
+  editMode,
+  onEnterEditMode,
+  onSetEditMode,
+  onDoneEditing,
+  isAbsorbing,
+  subdivisionCount,
+  isAddingSubdivision,
+  onStartSubdivision,
+  onCancelSubdivision,
+  onStartAbsorb,
+  onCancelAbsorb,
+  onDeleteCountry
+}: CountryPanelProps) {
   const [localColor, setLocalColor] = useState(data.color);
 
   return (
@@ -86,7 +108,16 @@ function CountryPanel({ countryId, data, onChange, onClose, editingCountry, edit
         </div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {isAbsorbing ? (
+        {isAddingSubdivision ? (
+          <>
+            <p style={{ fontSize: 13, color: '#444', margin: 0 }}>
+              Click around {data.name} to draw the subdivision boundary, then double-click to finish it.
+            </p>
+            <button onClick={onCancelSubdivision} style={buttonStyle('#6b7280')}>
+              Cancel
+            </button>
+          </>
+        ) : isAbsorbing ? (
           <>
             <p style={{ fontSize: 13, color: '#444', margin: 0 }}>
               Click another country on the map to absorb {data.name} into it.
@@ -100,6 +131,14 @@ function CountryPanel({ countryId, data, onChange, onClose, editingCountry, edit
             <button onClick={onEnterEditMode} style={buttonStyle('#4f46e5')}>
               Edit Borders
             </button>
+            <button onClick={onStartSubdivision} style={buttonStyle('#0891b2')}>
+              Add Subdivision
+            </button>
+            {subdivisionCount > 0 && (
+              <div style={{ fontSize: 13, color: '#444' }}>
+                {subdivisionCount} subdivision{subdivisionCount === 1 ? '' : 's'}
+              </div>
+            )}
             <button onClick={onStartAbsorb} style={buttonStyle('#ea580c')}>
               Absorb Into...
             </button>

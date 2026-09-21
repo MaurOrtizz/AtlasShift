@@ -27,7 +27,8 @@ app.add_middleware(
 class WorldPayload(BaseModel):
     name: str = Field(min_length=1)
     edits: dict
-    schema_version: Literal[0, 1, 2] = 0
+    subdivisions: dict = Field(default_factory=dict)
+    schema_version: Literal[0, 1, 2, 3] = 0
     base_map: dict | None = None
     background_image: str | None = None
     background_bounds: list[tuple[float, float]] | None = Field(default=None, min_length=4, max_length=4)
@@ -42,7 +43,7 @@ class WorldPayload(BaseModel):
         if self.base_map is not None:
             if self.base_map.get("type") != "FeatureCollection" or not isinstance(self.base_map.get("features"), list):
                 raise ValueError("Base map must be a GeoJSON FeatureCollection")
-        if self.schema_version == 2:
+        if self.schema_version >= 2:
             ids = set()
             for feature in self.base_map["features"]:
                 if not isinstance(feature, dict) or feature.get("type") != "Feature":
@@ -67,6 +68,22 @@ class WorldPayload(BaseModel):
                         validate_polygon(edit["geometry"])
                 elif territory_id not in ids:
                     raise ValueError("New territories require geometry")
+        if self.schema_version >= 3:
+            if not isinstance(self.subdivisions, dict):
+                raise ValueError("Subdivisions must be a dictionary")
+            for subdivision_id, subdivision in self.subdivisions.items():
+                validate_territory_id(subdivision_id)
+                if not isinstance(subdivision, dict) or not isinstance(subdivision.get("color"), str):
+                    raise ValueError("Subdivisions require a name, color, parent, and geometry")
+                validate_territory_name(subdivision.get("name"))
+                parent_id = subdivision.get("parent_id")
+                validate_territory_id(parent_id)
+                parent_edit = self.edits.get(parent_id)
+                parent_exists = parent_id in ids or (isinstance(parent_edit, dict) and parent_edit.get("geometry") is not None)
+                parent_deleted = isinstance(parent_edit, dict) and "geometry" in parent_edit and parent_edit.get("geometry") is None
+                if not parent_exists or parent_deleted:
+                    raise ValueError("Subdivisions must reference an existing country")
+                validate_polygon(subdivision.get("geometry"))
         return self
 
 

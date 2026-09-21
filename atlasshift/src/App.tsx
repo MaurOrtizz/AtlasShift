@@ -7,9 +7,10 @@ import countriesRaw from './data/countries_mid_res.geojson?raw';
 import BlankWorldMapJson from './data/BlankWorldMap.json'
 import type { StyleSpecification } from 'maplibre-gl';
 import { api, type WorldData, type BackgroundBounds } from './api';
-import { confirmReplacement, exportMap, normalizeBaseMap, normalizeLegacyMap, projectChanged, restoreWorld, worldPayload, type CountryData, type ProjectState } from './world';
+import { confirmReplacement, exportMap, normalizeBaseMap, normalizeLegacyMap, projectChanged, restoreWorld, worldPayload, type CountryData, type ProjectState, type SubdivisionData } from './world';
 import Navbar from './components/Navbar';
 import CountryPanel from './components/CountryPanel';
+import SubdivisionPanel from './components/SubdivisionPanel';
 import WorldsPanel from './components/WorldsPanel';
 import Sidebar from './components/Sidebar';
 import * as turf from '@turf/turf';
@@ -71,8 +72,9 @@ const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
 const defaultCountriesDataRaw = normalizeLegacyMap(JSON.parse(countriesRaw) as FeatureCollection);
 const { land: defaultCountriesData, sea: defaultSeaPolygons } = splitSeaFeatures(defaultCountriesDataRaw);
 const emptyEdits: Record<string, CountryData> = {};
+const emptySubdivisions: Record<string, SubdivisionData> = {};
 const initialProject: ProjectState = {
-  edits: emptyEdits, base_map: defaultCountriesDataRaw,
+  edits: emptyEdits, subdivisions: emptySubdivisions, base_map: defaultCountriesDataRaw,
   background_image: null, background_bounds: null, allow_overlapping: false,
 };
 
@@ -164,7 +166,9 @@ function App() {
   
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
+  const [selectedSubdivision, setSelectedSubdivision] = useState<string | null>(null);
   const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>(emptyEdits);
+  const [subdivisions, setSubdivisions] = useState<Record<string, SubdivisionData>>(emptySubdivisions);
   const getCountryData = useCallback((id: string): CountryData => countryEdits[id] ?? {
     name: countriesById.get(id)?.properties?.name ?? 'Unnamed country',
     color: countriesById.get(id)?.properties?.customColor ?? '#dcdcdc',
@@ -179,6 +183,8 @@ function App() {
   const [drawingPoints, setDrawingPoints] = useState<number[][]>([]);
   const [isAddingCountry, setIsAddingCountry] = useState(false);
   const [newCountryPoints, setNewCountryPoints] = useState<number[][]>([]);
+  const [isAddingSubdivisionFor, setIsAddingSubdivisionFor] = useState<string | null>(null);
+  const [newSubdivisionPoints, setNewSubdivisionPoints] = useState<number[][]>([]);
   const [draggingVertex, setDraggingVertex] = useState<{
     index: number;
     polygonIndex: number;
@@ -193,18 +199,23 @@ function App() {
 
   const [baseMap, setBaseMap] = useState<FeatureCollection>(defaultCountriesDataRaw);
   const project = useMemo<ProjectState>(() => ({
-    edits: countryEdits, base_map: baseMap, background_image: backgroundImage,
+    edits: countryEdits, subdivisions, base_map: baseMap, background_image: backgroundImage,
     background_bounds: backgroundBounds, allow_overlapping: allowOverlapping,
-  }), [countryEdits, baseMap, backgroundImage, backgroundBounds, allowOverlapping]);
+  }), [countryEdits, subdivisions, baseMap, backgroundImage, backgroundBounds, allowOverlapping]);
   const committedGeometry = editingCountry
     ? countryEdits[editingCountry]?.geometry ?? countriesById.get(editingCountry)?.geometry
     : null;
-  const hasDraftChanges = (isAddingCountry && newCountryPoints.length > 0) || Boolean(editingCountry && (
+  const getCountryGeometry = useCallback((id: string): Geometry | null =>
+    countryEdits[id]?.geometry ?? countriesById.get(id)?.geometry ?? null,
+    [countryEdits, countriesById]);
+  const hasDraftChanges = (isAddingCountry && newCountryPoints.length > 0) ||
+    Boolean(isAddingSubdivisionFor && newSubdivisionPoints.length > 0) ||
+    Boolean(editingCountry && (
     drawingPoints.length > 0 || (editedGeometries[editingCountry] && editedGeometries[editingCountry] !== committedGeometry)
   ));
   const hasUnsavedChanges = projectChanged(project, savedProject) || hasDraftChanges;
-  const revision = useMemo(() => ({ project, editedGeometries, drawingPoints, newCountryPoints }),
-    [project, editedGeometries, drawingPoints, newCountryPoints]);
+  const revision = useMemo(() => ({ project, editedGeometries, drawingPoints, newCountryPoints, newSubdivisionPoints }),
+    [project, editedGeometries, drawingPoints, newCountryPoints, newSubdivisionPoints]);
   const latestProject = useRef({ project, hasDraftChanges, revision });
   useEffect(() => { latestProject.current = { project, hasDraftChanges, revision }; }, [project, hasDraftChanges, revision]);
   useEffect(() => {
@@ -222,7 +233,9 @@ function App() {
     setEditMode(mode);
     setDrawingPoints([]);
     setNewCountryPoints([]);
+    setNewSubdivisionPoints([]);
     setIsAddingCountry(false);
+    setIsAddingSubdivisionFor(null);
   }, [drawingPoints.length]);
 
   const onMouseLeave = useCallback(() => {
@@ -238,7 +251,7 @@ function App() {
     if (clickedVertex) return;
 
     if (absorbingCountry) {
-      const feature = e.features?.[0];
+      const feature = e.features?.find(f => f.properties?.territoryId);
       if (!feature) {
         setAbsorbingCountry(null);
         return;
@@ -272,11 +285,21 @@ function App() {
           geometry: unioned ? unioned.geometry : targetGeometry
         }
       }));
+      setSubdivisions(prev => Object.fromEntries(
+        Object.entries(prev).filter(([, subdivision]) => subdivision.parent_id !== absorbingCountry)
+      ));
 
       setAbsorbingCountry(null);
       setSelectedCountry(null);
+      setSelectedSubdivision(null);
       setEditingCountry(null);
       setEditMode(null);
+      return;
+    }
+
+    if (isAddingSubdivisionFor) {
+      const { lngLat } = e;
+      setNewSubdivisionPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
       return;
     }
 
@@ -350,21 +373,79 @@ function App() {
       return;
     }
 
-    const feature = e.features?.[0];
+    const subdivisionFeature = e.features?.find(f => f.properties?.subdivisionId);
+    if (subdivisionFeature?.properties?.subdivisionId) {
+      const subdivisionId = subdivisionFeature.properties.subdivisionId;
+      if (subdivisionId !== selectedSubdivision && !confirmDiscardDraft()) return;
+      setSelectedSubdivision(subdivisionId);
+      setSelectedCountry(subdivisionFeature.properties.parentTerritoryId ?? subdivisions[subdivisionId]?.parent_id ?? null);
+      setEditingCountry(null);
+      setEditMode(null);
+      return;
+    }
+
+    const feature = e.features?.find(f => f.properties?.territoryId);
     if (feature?.properties?.territoryId !== selectedCountry && !confirmDiscardDraft()) return;
     if (feature?.properties?.territoryId) {
       const name = feature.properties?.territoryId;
       setSelectedCountry(name);
+      setSelectedSubdivision(null);
       if (name !== selectedCountry) { setEditingCountry(null); setEditMode(null); }
     } else {
       setSelectedCountry(null);
+      setSelectedSubdivision(null);
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits, countriesById, selectedCountry, confirmDiscardDraft, getCountryData]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry, isAddingSubdivisionFor, absorbingCountry, countryEdits, countriesById, selectedCountry, selectedSubdivision, subdivisions, confirmDiscardDraft, getCountryData]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
+
+    if (isAddingSubdivisionFor) {
+      if (newSubdivisionPoints.length < 3) return;
+
+      const parentGeometry = getCountryGeometry(isAddingSubdivisionFor);
+      if (!parentGeometry) {
+        alert('The selected country has no geometry for subdivision clipping.');
+        return;
+      }
+
+      const name = prompt('Name your new subdivision:')?.trim();
+      if (!name) return;
+      let id: string;
+      do { id = `subdivision-${crypto.randomUUID()}`; } while (Object.hasOwn(subdivisions, id));
+
+      const rawGeometry = {
+        type: 'Polygon' as const,
+        coordinates: [[...newSubdivisionPoints, newSubdivisionPoints[0]]]
+      };
+
+      const clipped = turf.intersect(turf.featureCollection([
+        turf.feature(rawGeometry),
+        turf.feature(parentGeometry as Polygon | MultiPolygon)
+      ]));
+      if (!clipped) {
+        alert('This subdivision is outside the selected country and cannot be created.');
+        return;
+      }
+
+      setSubdivisions(prev => ({
+        ...prev,
+        [id]: {
+          parent_id: isAddingSubdivisionFor,
+          name,
+          color: '#7dd3fc',
+          geometry: clipped.geometry,
+          properties: {}
+        }
+      }));
+      setSelectedSubdivision(id);
+      setSelectedCountry(isAddingSubdivisionFor);
+      setIsAddingSubdivisionFor(null);
+      setNewSubdivisionPoints([]);
+      return;
+    }
 
     if (isAddingCountry) {
       if (newCountryPoints.length < 3) return;
@@ -429,6 +510,9 @@ function App() {
               geometry: null
             };
           });
+          setSubdivisions(prev => Object.fromEntries(
+            Object.entries(prev).filter(([, subdivision]) => !countriesToAbsorb.includes(subdivision.parent_id))
+          ));
         }
       }
 
@@ -460,16 +544,41 @@ function App() {
         [name]: geometry
       }));
     }
-  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData]);
+  }, [isAddingSubdivisionFor, newSubdivisionPoints, getCountryGeometry, subdivisions, isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
     setCountryEdits(prev => ({ ...prev, [selectedCountry]: { ...prev[selectedCountry], ...data } }));
   }, [selectedCountry]);
 
+  const handleSubdivisionChange = useCallback((data: Pick<SubdivisionData, 'name' | 'color'>) => {
+    if (!selectedSubdivision) return;
+    setSubdivisions(prev => ({
+      ...prev,
+      [selectedSubdivision]: { ...prev[selectedSubdivision], ...data }
+    }));
+  }, [selectedSubdivision]);
+
+  const handleDeleteSubdivision = useCallback(() => {
+    if (!selectedSubdivision) return;
+    const confirmed = window.confirm(`Delete ${subdivisions[selectedSubdivision]?.name ?? 'this subdivision'} completely?`);
+    if (!confirmed) return;
+    setSubdivisions(prev => {
+      const next = { ...prev };
+      delete next[selectedSubdivision];
+      return next;
+    });
+    setSelectedSubdivision(null);
+  }, [selectedSubdivision, subdivisions]);
+
   const handleDeleteCountry = useCallback(() => {
     if (!selectedCountry) return;
-    const confirmed = window.confirm(`Delete ${getCountryData(selectedCountry).name} completely?`);
+    const subdivisionCount = Object.values(subdivisions).filter(subdivision => subdivision.parent_id === selectedCountry).length;
+    const confirmed = window.confirm(
+      subdivisionCount > 0
+        ? `Delete ${getCountryData(selectedCountry).name} and its ${subdivisionCount} subdivision${subdivisionCount === 1 ? '' : 's'} completely?`
+        : `Delete ${getCountryData(selectedCountry).name} completely?`
+    );
     if (!confirmed) return;
 
     setCountryEdits(prev => ({
@@ -479,10 +588,14 @@ function App() {
         geometry: null
       }
     }));
+    setSubdivisions(prev => Object.fromEntries(
+      Object.entries(prev).filter(([, subdivision]) => subdivision.parent_id !== selectedCountry)
+    ));
     setSelectedCountry(null);
+    setSelectedSubdivision(null);
     setEditingCountry(null);
     setEditMode(null);
-  }, [selectedCountry, getCountryData]);
+  }, [selectedCountry, getCountryData, subdivisions]);
 
   const handleStartAbsorb = useCallback(() => {
     setAbsorbingCountry(selectedCountry);
@@ -490,6 +603,23 @@ function App() {
 
   const handleCancelAbsorb = useCallback(() => {
     setAbsorbingCountry(null);
+  }, []);
+
+  const handleStartSubdivision = useCallback(() => {
+    if (!selectedCountry || !getCountryGeometry(selectedCountry)) return;
+    if (!confirmDiscardDraft()) return;
+    setSelectedSubdivision(null);
+    setIsAddingSubdivisionFor(selectedCountry);
+    setNewSubdivisionPoints([]);
+    setIsAddingCountry(false);
+    setNewCountryPoints([]);
+    setEditingCountry(null);
+    setEditMode(null);
+  }, [selectedCountry, getCountryGeometry, confirmDiscardDraft]);
+
+  const handleCancelSubdivision = useCallback(() => {
+    setIsAddingSubdivisionFor(null);
+    setNewSubdivisionPoints([]);
   }, []);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
@@ -531,13 +661,16 @@ function App() {
 
   const resetEditing = useCallback(() => {
     setSelectedCountry(null);
+    setSelectedSubdivision(null);
     setHoveredCountry(null);
     setEditingCountry(null);
     setEditMode(null);
     setEditedGeometries({});
     setDrawingPoints([]);
     setNewCountryPoints([]);
+    setNewSubdivisionPoints([]);
     setIsAddingCountry(false);
+    setIsAddingSubdivisionFor(null);
     setDraggingVertex(null);
     setAbsorbingCountry(null);
   }, []);
@@ -560,6 +693,7 @@ function App() {
       setCountriesData(land);
       setSeaPolygons(sea);
       setCountryEdits(restored.edits);
+      setSubdivisions(restored.subdivisions);
       setCurrentWorldId(fresh.id!);
       setCurrentWorldName(fresh.name);
       setBackgroundImage(restored.background_image);
@@ -618,6 +752,7 @@ function App() {
       setCountriesData(land);
       setSeaPolygons(sea);
       setCountryEdits({});
+      setSubdivisions({});
       setCurrentWorldId(null);
       setCurrentWorldName(null);
       setBackgroundImage(null);
@@ -706,6 +841,9 @@ function App() {
               geometry: null
             };
           });
+          setSubdivisions(prev => Object.fromEntries(
+            Object.entries(prev).filter(([, subdivision]) => !countriesToAbsorb.includes(subdivision.parent_id))
+          ));
         }
 
         updatedEdits[editingCountry] = {
@@ -832,8 +970,9 @@ function App() {
     };
   }, [editingCountry, editedGeometries, drawingPoints, countryEdits, countriesById, getCountryData]);
 
-  const newCountryData = useMemo(() => {
-    if (!isAddingCountry || newCountryPoints.length === 0) return null;
+  const newTerritoryData = useMemo(() => {
+    const points = isAddingSubdivisionFor ? newSubdivisionPoints : newCountryPoints;
+    if ((!isAddingCountry && !isAddingSubdivisionFor) || points.length === 0) return null;
 
     return {
       type: 'FeatureCollection' as const,
@@ -841,18 +980,18 @@ function App() {
         {
           type: 'Feature' as const,
           properties: { isShape: true },
-          geometry: newCountryPoints.length >= 3
-            ? { type: 'Polygon' as const, coordinates: [[...newCountryPoints, newCountryPoints[0]]] }
-            : { type: 'LineString' as const, coordinates: newCountryPoints }
+          geometry: points.length >= 3
+            ? { type: 'Polygon' as const, coordinates: [[...points, points[0]]] }
+            : { type: 'LineString' as const, coordinates: points }
         },
-        ...newCountryPoints.map((coord, index) => ({
+        ...points.map((coord, index) => ({
           type: 'Feature' as const,
           properties: { isVertex: true, index },
           geometry: { type: 'Point' as const, coordinates: coord }
         }))
       ]
     };
-  }, [isAddingCountry, newCountryPoints]);
+  }, [isAddingCountry, isAddingSubdivisionFor, newCountryPoints, newSubdivisionPoints]);
 
   const allCountriesData = useMemo(() => ({
     type: 'FeatureCollection' as const,
@@ -860,6 +999,22 @@ function App() {
       .filter(feature => feature.id !== editingCountry)
       .map(feature => ({ ...feature, properties: { ...feature.properties, territoryId: String(feature.id) } })),
   }), [countriesData, countryEdits, editingCountry]);
+
+  const allSubdivisionsData = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: Object.entries(subdivisions).map(([id, subdivision]) => ({
+      type: 'Feature' as const,
+      id,
+      properties: {
+        ...subdivision.properties,
+        name: subdivision.name,
+        subdivisionId: id,
+        parentTerritoryId: subdivision.parent_id,
+        customColor: subdivision.color,
+      },
+      geometry: subdivision.geometry,
+    })),
+  }), [subdivisions]);
 
   const handleExportCountries = useCallback(() => {
     if (hasDraftChanges) {
@@ -902,17 +1057,22 @@ function App() {
   const onMouseMoveWithDrag = useCallback((e: MapLayerMouseEvent) => {
     if (draggingVertex?.isNewCountryVertex) {
       const { lngLat } = e;
-      setNewCountryPoints(prev => {
+      const updatePoints = (prev: number[][]) => {
         const updated = [...prev];
         updated[draggingVertex.index] = [lngLat.lng, lngLat.lat];
         return updated;
-      });
+      };
+      if (isAddingSubdivisionFor) {
+        setNewSubdivisionPoints(updatePoints);
+      } else {
+        setNewCountryPoints(updatePoints);
+      }
       return;
     }
 
-    const feature = e.features?.[0];
+    const feature = e.features?.find(f => f.properties?.territoryId || f.properties?.subdivisionId);
     if (!draggingVertex || !editingCountry) {
-      setHoveredCountry(feature ? feature.properties?.territoryId : null);
+      setHoveredCountry(feature?.properties?.territoryId ?? null);
       return;
     }
 
@@ -941,7 +1101,7 @@ function App() {
       );
       return { ...prev, [editingCountry]: updated };
     });
-  }, [draggingVertex, editingCountry, countriesById]);
+  }, [draggingVertex, editingCountry, countriesById, isAddingSubdivisionFor]);
 
   const onMouseUp = useCallback(() => {
     setDraggingVertex(null);
@@ -976,11 +1136,16 @@ function App() {
   }, []);
 
   const handleDeleteNewCountryVertex = useCallback((vertexIndex: number) => {
-    setNewCountryPoints(prev => {
+    const updatePoints = (prev: number[][]) => {
       if (prev.length <= 3) return prev;
       return prev.filter((_, i) => i !== vertexIndex);
-    });
-  }, []);
+    };
+    if (isAddingSubdivisionFor) {
+      setNewSubdivisionPoints(updatePoints);
+    } else {
+      setNewCountryPoints(updatePoints);
+    }
+  }, [isAddingSubdivisionFor]);
 
   return (
     <div
@@ -1057,6 +1222,9 @@ function App() {
           if (!confirmDiscardDraft()) return;
           setIsAddingCountry(prev => !prev);
           setNewCountryPoints([]);
+          setIsAddingSubdivisionFor(null);
+          setNewSubdivisionPoints([]);
+          setSelectedSubdivision(null);
           setDrawingPoints([]);
           setEditMode(null);
           setEditingCountry(null);
@@ -1071,7 +1239,7 @@ function App() {
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
         style={{ width: '100%', height: '100%' }}
         mapStyle={BlankWorldMap}
-        interactiveLayerIds={['countries-fill', 'editing-country-fill', 'vertices-layer', 'editing-country-border', 'new-vertices-layer']}
+        interactiveLayerIds={['subdivisions-fill', 'countries-fill', 'editing-country-fill', 'vertices-layer', 'editing-country-border', 'new-vertices-layer']}
         onMouseMove={onMouseMoveWithDrag}
         onMouseLeave={onMouseLeave}
         onDblClick={onDblClick}
@@ -1123,6 +1291,30 @@ function App() {
             }}
           />
         </Source>
+        {allSubdivisionsData.features.length > 0 && (
+          <Source id="subdivisions" type="geojson" data={allSubdivisionsData}>
+            <Layer
+              id="subdivisions-fill"
+              type="fill"
+              paint={{
+                'fill-color': [
+                  'case',
+                  ['==', ['get', 'subdivisionId'], selectedSubdivision], '#0e7490',
+                  ['get', 'customColor']
+                ],
+                'fill-opacity': 0.45
+              }}
+            />
+            <Layer
+              id="subdivisions-border"
+              type="line"
+              paint={{
+                'line-color': '#0e7490',
+                'line-width': 1.5
+              }}
+            />
+          </Source>
+        )}
         {editingCountryData && (
           <Source id="editing-country" type="geojson" data={editingCountryData}>
             <Layer
@@ -1172,13 +1364,13 @@ function App() {
             />
           </Source>
         )}
-        {newCountryData && (
-          <Source id="new-country" type="geojson" data={newCountryData}>
+        {newTerritoryData && (
+          <Source id="new-country" type="geojson" data={newTerritoryData}>
             <Layer
               id="new-country-fill"
               type="fill"
               filter={['has', 'isShape']}
-              paint={{ 'fill-color': '#16a34a', 'fill-opacity': 0.6 }}
+              paint={{ 'fill-color': isAddingSubdivisionFor ? '#0891b2' : '#16a34a', 'fill-opacity': 0.6 }}
             />
             <Layer
               id="new-editing-country-border"
@@ -1227,7 +1419,18 @@ function App() {
         />
       )}
 
-      {!showWorldsPanel && selectedCountry && (
+      {!showWorldsPanel && selectedSubdivision && subdivisions[selectedSubdivision] && (
+        <SubdivisionPanel
+          key={selectedSubdivision}
+          data={subdivisions[selectedSubdivision]}
+          parentName={getCountryData(subdivisions[selectedSubdivision].parent_id).name}
+          onChange={handleSubdivisionChange}
+          onClose={() => setSelectedSubdivision(null)}
+          onDeleteSubdivision={handleDeleteSubdivision}
+        />
+      )}
+
+      {!showWorldsPanel && selectedCountry && !selectedSubdivision && (
         <CountryPanel
           key={selectedCountry}
           countryId={selectedCountry}
@@ -1257,6 +1460,10 @@ function App() {
           onSetEditMode={handleSetEditMode}
           onDoneEditing={handleDoneEditing}
           isAbsorbing={absorbingCountry === selectedCountry}
+          subdivisionCount={Object.values(subdivisions).filter(subdivision => subdivision.parent_id === selectedCountry).length}
+          isAddingSubdivision={isAddingSubdivisionFor === selectedCountry}
+          onStartSubdivision={handleStartSubdivision}
+          onCancelSubdivision={handleCancelSubdivision}
           onStartAbsorb={handleStartAbsorb}
           onCancelAbsorb={handleCancelAbsorb}
           onDeleteCountry={handleDeleteCountry}

@@ -7,7 +7,7 @@ const geometry = { type: 'Polygon', coordinates: [[[0, 0], [2, 0], [2, 2], [0, 0
 const land = { type: 'Feature', id: 'Original', properties: { name: 'Original' }, geometry };
 const sea = { type: 'Feature', id: 'sea-mask', properties: { name: 'Sea', featureType: 'sea' }, geometry };
 const base = { type: 'FeatureCollection', features: [land, sea] };
-const initial = { edits: {}, base_map: base, background_image: null, background_bounds: null, allow_overlapping: false };
+const initial = { edits: {}, subdivisions: {}, base_map: base, background_image: null, background_bounds: null, allow_overlapping: false };
 const roundTrip = value => JSON.parse(JSON.stringify(value));
 
 test('saving appearance changes preserves the base geometry; deletion remains explicit', () => {
@@ -35,7 +35,7 @@ test('legacy worlds use the default map, not the map currently imported', () => 
   const restored = restoreWorld({ name: 'Legacy', edits: { Original: { name: 'Gone', color: '#fff', geometry: null } } }, base);
   assert.deepEqual(restored.base_map, base);
   assert.equal(restored.edits.Original.geometry, null);
-  assert.throws(() => restoreWorld({ schema_version: 3 }, base), /unsupported/);
+  assert.throws(() => restoreWorld({ schema_version: 4 }, base), /unsupported/);
   assert.throws(() => restoreWorld({ schema_version: 1, edits: {} }, base), /missing/);
 });
 
@@ -49,7 +49,7 @@ test('renames and duplicate display names preserve independent IDs across save/e
     'new-country': { name: 'Shared', color: '#778899', geometry },
   } };
   const saved = roundTrip(worldPayload('Identity', state));
-  assert.equal(saved.schema_version, 2);
+  assert.equal(saved.schema_version, 3);
   const restored = restoreWorld(saved, base);
   const exported = exportMap(restored.base_map, restored.edits);
   const reimported = normalizeBaseMap(roundTrip(exported));
@@ -87,6 +87,24 @@ test('legacy migration maps old name keys, keeps new countries and deletions, an
   assert.equal(migrated.edits['legacy-1'].name, 'Original');
   assert.equal(migrated.edits['legacy-2'].geometry, null);
   assert.deepEqual(restoreWorld(roundTrip(worldPayload('Migrated', migrated)), base), migrated);
+});
+
+test('subdivisions persist under stable parent IDs and reject missing parents', () => {
+  const state = { ...initial, subdivisions: {
+    'subdivision-a': { parent_id: 'Original', name: 'North', color: '#7dd3fc', geometry },
+  } };
+  const saved = roundTrip(worldPayload('Subdivisions', state));
+  assert.equal(saved.schema_version, 3);
+  const restored = restoreWorld(saved, base);
+  assert.deepEqual(restored.subdivisions['subdivision-a'], state.subdivisions['subdivision-a']);
+  assert.throws(() => restoreWorld({
+    ...saved,
+    subdivisions: { 'subdivision-a': { ...state.subdivisions['subdivision-a'], parent_id: 'missing-country' } },
+  }, base), /missing or deleted country/);
+  assert.throws(() => worldPayload('Bad', {
+    ...initial,
+    subdivisions: { '': { parent_id: 'Original', name: 'North', color: '#7dd3fc', geometry } },
+  }), /valid stable IDs/);
 });
 
 test('legacy duplicate removal retains distinct sea masks and copies sharing names', () => {
