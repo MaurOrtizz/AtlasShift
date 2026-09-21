@@ -6,7 +6,7 @@ AtlasShift is an interactive political map editor for building alternate worlds.
 
 The project combines visual editing with real geographic operations. Borders are represented as GeoJSON, while polygon unions, intersections, differences, and sea clipping are calculated directly in the browser. A FastAPI backend stores named worlds in a local SQLite database so they can be revisited and refined.
 
-> **Project status:** AtlasShift is under active development. Core territory editing and world management are available; review the current limitations before relying on it as the only copy of an important map.
+> **Project status:** AtlasShift is under active development. Core territory editing and complete world snapshots are available, with regression tests for persistence and API failures. Country subdivisions are on the roadmap.
 
 ## Features
 
@@ -72,6 +72,8 @@ cd server
 
 Starting the server from `server/` makes SQLite use `server/atlasshift.db`. The database and its tables are created automatically when the API starts.
 
+Existing databases receive an additive migration on startup to store complete project snapshots. Existing rows are preserved. Version 1 worlds include the base map (including sea features), edits, background metadata, and overlap settings. Legacy worlds still load against the bundled default map; previously missing custom base maps or geometries cannot be reconstructed automatically. Back up an existing database before upgrading.
+
 ### 2. Frontend
 
 In another terminal, run these commands from the repository root:
@@ -102,7 +104,7 @@ Open [http://localhost:5173](http://localhost:5173). The backend currently allow
 3. To add territory to the selected country, use **Edit Borders → Draw Territory**, place the polygon points, and select **Done** once the shape has at least three points.
 4. To create a country, select **Add Polygon** from the toolbar, place at least three points, and double-click to finish. Enter a unique country name when prompted.
 5. To merge countries, select the country that will be absorbed, choose **Absorb Into...**, click the receiving country, and confirm the operation.
-6. Select **Save** and name the world. It can then be opened from **My Worlds**.
+6. Finish any active territory edit, then select **Save** and name the world. It can then be opened from **My Worlds**. Unsaved work is checked before importing or switching worlds; cancelling or failing a save stops that action. Closing the tab also warns about pending changes.
 7. Use **Export Countries GeoJSON** to download `countries.geojson`. **Import Countries GeoJSON** accepts a GeoJSON `FeatureCollection`; country features should use `Polygon` or `MultiPolygon` geometries and unique names in `properties.name`.
 
 The **Allow Overlapping** switch controls whether countries may cover the same area. When it is disabled, a new border can trim neighboring countries, so inspect the result before saving.
@@ -135,18 +137,27 @@ Run the frontend commands from `atlasshift/`:
 | --- | --- |
 | `npm run dev` | Start the development server. |
 | `npm run lint` | Check the source code with ESLint. |
+| `npm test` | Run frontend regression tests using Node's built-in test runner. |
 | `npm run build` | Type-check the project and create a production build in `dist/`. |
 | `npm run preview` | Serve the production build locally; this does not start the backend. |
 
-The API exposes `GET /worlds`, `GET /worlds/{id}`, `POST /worlds`, `PUT /worlds/{id}`, and `DELETE /worlds/{id}`. Create and update requests accept an object containing `name` and `edits`. With the server running, use the [interactive FastAPI documentation](http://localhost:8000/docs) to inspect and test these operations.
+The API exposes `GET /worlds`, `GET /worlds/{id}`, `POST /worlds`, `PUT /worlds/{id}`, and `DELETE /worlds/{id}`. Version 1 create and update requests contain `name`, `edits`, `schema_version: 1`, and a GeoJSON `base_map`; optional fields store background metadata and overlap settings. In an edit, an omitted `geometry` preserves the base geometry, while `geometry: null` explicitly deletes the country. Legacy payloads can still create legacy worlds, but cannot overwrite version 1 worlds. With the server running, use the [interactive FastAPI documentation](http://localhost:8000/docs) to inspect and test these operations.
 
-GitHub Actions lints and builds the frontend and builds both Docker images. Pushes to `main` publish the `atlasshift-frontend` and `atlasshift-backend` images to GHCR. To build the production frontend image manually, provide the API URL through the `VITE_API_URL` build argument; Vite embeds this value during compilation.
+Run backend tests from the repository root with the Python interpreter from your virtual environment:
+
+```sh
+python -m unittest discover -s server -p "test_*.py" -v
+```
+
+The backend tests use isolated in-memory databases, including a legacy-schema migration test; they do not change saved worlds. Frontend tests cover editor state transitions, save cancellation, concurrent edits, HTTP failures, project round trips, and GeoJSON validation.
+
+GitHub Actions runs both test suites, lints and builds the frontend, and builds both Docker images. Pushes to `main` publish the `atlasshift-frontend` and `atlasshift-backend` images to GHCR. To build the production frontend image manually, provide the API URL through the `VITE_API_URL` build argument; Vite embeds this value during compilation.
 
 ## Current limitations
 
-- **Custom backgrounds:** the interface includes an image upload control, but the backend does not yet implement `/uploads/background-image` or background persistence. This feature is not currently available end to end.
-- **Development-stage persistence:** AtlasShift stores world edits rather than a full copy of an imported base map. The save flow also converts missing geometries to `null`, which is the same value used for deleted countries; this can affect countries changed only by name or color after reloading. Export the geometry before closing an important session and verify the result after loading it again.
-- **GeoJSON exchange:** the country export does not include the separate sea geometries or a complete project with every resource. It should not be treated as a full world backup.
+- **Custom backgrounds:** project snapshots preserve background metadata, but `/uploads/background-image` is not implemented yet. The upload control is disabled until file storage is available.
+- **Legacy worlds:** old saves may already contain lost geometries or lack their imported base map. Compatibility preserves their stored data without guessing which deletions were accidental.
+- **GeoJSON exchange:** export includes committed country geometries, names, colors, and sea features, but not world-level settings or background resources. Complete snapshots are stored through **Save**.
 - **External base map:** the current style uses MapTiler resources and contains a sample key. For reliable use, configure your own key in `atlasshift/src/data/BlankWorldMap.json` or replace the source with another compatible provider.
 - **Local use:** the API has no authentication or per-user world separation. The included environment is designed for local development and demonstrations.
 

@@ -3,9 +3,11 @@ interface NavbarProps {
   onMyWorlds: () => void;
   allowOverlapping: boolean;
   onToggleOverlapping: () => void;
+  isSaving: boolean;
+  hasUnsavedChanges: boolean;
 }
 
-function Navbar({ onSave, onMyWorlds, allowOverlapping, onToggleOverlapping }: NavbarProps) {
+function Navbar({ onSave, onMyWorlds, allowOverlapping, onToggleOverlapping, isSaving, hasUnsavedChanges }: NavbarProps) {
   return (
     <div style={{
       position: 'absolute',
@@ -70,6 +72,7 @@ function Navbar({ onSave, onMyWorlds, allowOverlapping, onToggleOverlapping }: N
         </button>
         <button
           onClick={onSave}
+          disabled={isSaving}
           style={{
             padding: '6px 16px',
             borderRadius: 6,
@@ -81,7 +84,7 @@ function Navbar({ onSave, onMyWorlds, allowOverlapping, onToggleOverlapping }: N
             fontSize: 14
           }}
         >
-          Save
+          {isSaving ? 'Saving...' : hasUnsavedChanges ? 'Save changes' : 'Save'}
         </button>
       </div>
     </div>

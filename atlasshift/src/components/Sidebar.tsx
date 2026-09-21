@@ -107,8 +107,9 @@ function Sidebar({
       />
       <button
         onClick={() => backgroundFileInputRef.current?.click()}
-        title="Upload Background Map"
-        style={iconButtonStyle(false)}
+        disabled
+        title="Custom background uploads are not available yet"
+        style={{ ...iconButtonStyle(false), opacity: 0.4, cursor: 'not-allowed' }}
       >
         ▣
       </button>

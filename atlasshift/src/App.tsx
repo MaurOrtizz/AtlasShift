@@ -7,19 +7,13 @@ import countriesRaw from './data/countries_mid_res.geojson?raw';
 import BlankWorldMapJson from './data/BlankWorldMap.json'
 import type { StyleSpecification } from 'maplibre-gl';
 import { api, type WorldData, type BackgroundBounds } from './api';
+import { confirmReplacement, exportMap, normalizeBaseMap, projectChanged, restoreWorld, worldPayload, type CountryData, type ProjectState } from './world';
 import Navbar from './components/Navbar';
 import CountryPanel from './components/CountryPanel';
 import WorldsPanel from './components/WorldsPanel';
 import Sidebar from './components/Sidebar';
 import * as turf from '@turf/turf';
-import type { Feature, FeatureCollection, Geometry, Polygon, MultiPolygon, GeoJsonProperties, Position } from 'geojson';
-
-interface CountryData {
-  name: string;
-  color: string;
-  geometry?: Geometry | null;
-  properties?: GeoJsonProperties;
-}
+import type { Feature, FeatureCollection, Geometry, Polygon, MultiPolygon, Position } from 'geojson';
 
 type VertexFeature = NonNullable<MapLayerMouseEvent['features']>[number];
 
@@ -76,6 +70,11 @@ function clipGeometryToLand(
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
 const defaultCountriesDataRaw = JSON.parse(countriesRaw) as FeatureCollection;
 const { land: defaultCountriesData, sea: defaultSeaPolygons } = splitSeaFeatures(defaultCountriesDataRaw);
+const emptyEdits: Record<string, CountryData> = {};
+const initialProject: ProjectState = {
+  edits: emptyEdits, base_map: defaultCountriesDataRaw,
+  background_image: null, background_bounds: null, allow_overlapping: false,
+};
 
 function bboxesOverlap(a: number[], b: number[]) {
   return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
@@ -153,8 +152,10 @@ function downloadJSON(data: unknown, filename: string) {
 function App() {
   const [countriesData, setCountriesData] = useState<FeatureCollection>(defaultCountriesData);
   const [seaPolygons, setSeaPolygons] = useState<Feature[]>(defaultSeaPolygons);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const isFirstRender = useRef(true);
+  const [savedProject, setSavedProject] = useState(initialProject);
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
+  const loadRequest = useRef(0);
 
   const countriesByName = useMemo(
     () => new Map<string, Feature>(countriesData.features.map((f) => [f.properties?.name, f])),
@@ -163,7 +164,7 @@ function App() {
   
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
-  const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>({});
+  const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>(emptyEdits);
   const [showWorldsPanel, setShowWorldsPanel] = useState(false);
   const [currentWorldId, setCurrentWorldId] = useState<number | null>(null);
   const [currentWorldName, setCurrentWorldName] = useState<string | null>(null);
@@ -183,22 +184,42 @@ function App() {
     isNewCountryVertex?: boolean;
   } | null>(null);
   const [absorbingCountry, setAbsorbingCountry] = useState<string | null>(null);
-  useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
-    }
-    setHasUnsavedChanges(true);
-  }, [countryEdits]);
   const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
   const [backgroundBounds, setBackgroundBounds] = useState<BackgroundBounds | null>(null);
 
+  const [baseMap, setBaseMap] = useState<FeatureCollection>(defaultCountriesDataRaw);
+  const project = useMemo<ProjectState>(() => ({
+    edits: countryEdits, base_map: baseMap, background_image: backgroundImage,
+    background_bounds: backgroundBounds, allow_overlapping: allowOverlapping,
+  }), [countryEdits, baseMap, backgroundImage, backgroundBounds, allowOverlapping]);
+  const committedGeometry = editingCountry
+    ? countryEdits[editingCountry]?.geometry ?? countriesByName.get(editingCountry)?.geometry
+    : null;
+  const hasDraftChanges = (isAddingCountry && newCountryPoints.length > 0) || Boolean(editingCountry && (
+    drawingPoints.length > 0 || (editedGeometries[editingCountry] && editedGeometries[editingCountry] !== committedGeometry)
+  ));
+  const hasUnsavedChanges = projectChanged(project, savedProject) || hasDraftChanges;
+  const revision = useMemo(() => ({ project, editedGeometries, drawingPoints, newCountryPoints }),
+    [project, editedGeometries, drawingPoints, newCountryPoints]);
+  const latestProject = useRef({ project, hasDraftChanges, revision });
+  useEffect(() => { latestProject.current = { project, hasDraftChanges, revision }; }, [project, hasDraftChanges, revision]);
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [hasUnsavedChanges]);
+
+  const confirmDiscardDraft = useCallback(() =>
+    !hasDraftChanges || window.confirm('Discard the unfinished territory edit?'), [hasDraftChanges]);
+
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
+    if (drawingPoints.length && !window.confirm('Discard the unfinished drawn territory?')) return;
     setEditMode(mode);
     setDrawingPoints([]);
     setNewCountryPoints([]);
     setIsAddingCountry(false);
-  }, []);
+  }, [drawingPoints.length]);
 
   const onMouseLeave = useCallback(() => {
     setHoveredCountry(null);
@@ -213,7 +234,7 @@ function App() {
           !countriesByName.has(name) &&
           name !== editingCountry
       ),
-    [countryEdits, editingCountry]
+    [countryEdits, editingCountry, countriesByName]
   );
 
   const onClick = useCallback((e: MapLayerMouseEvent) => {
@@ -251,11 +272,11 @@ function App() {
       setCountryEdits(prev => ({
         ...prev,
         [absorbingCountry]: {
-          ...prev[absorbingCountry] ?? { name: absorbingCountry, color: '#dcdcdc' },
+          ...prev[absorbingCountry] ?? { name: absorbingCountry, color: countriesByName.get(absorbingCountry)?.properties?.customColor ?? '#dcdcdc' },
           geometry: null
         },
         [targetName]: {
-          ...prev[targetName] ?? { name: targetName, color: '#dcdcdc' },
+          ...prev[targetName] ?? { name: targetName, color: countriesByName.get(targetName)?.properties?.customColor ?? '#dcdcdc' },
           geometry: unioned ? unioned.geometry : targetGeometry
         }
       }));
@@ -338,19 +359,17 @@ function App() {
     }
 
     const feature = e.features?.[0];
+    if (feature?.properties?.name !== selectedCountry && !confirmDiscardDraft()) return;
     if (feature) {
       const name = feature.properties?.name;
       setSelectedCountry(name);
-      setCountryEdits(prev => {
-        if (prev[name]) return prev;
-        return { ...prev, [name]: { name, color: '#dcdcdc' } };
-      });
+      if (name !== selectedCountry) { setEditingCountry(null); setEditMode(null); }
     } else {
       setSelectedCountry(null);
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits, seaPolygons]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits, countriesByName, selectedCountry, confirmDiscardDraft]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
@@ -360,6 +379,10 @@ function App() {
 
       const name = prompt('Name your new country:');
       if (!name) return;
+      if (!name.trim() || countriesByName.has(name) || Object.hasOwn(countryEdits, name) || ['__proto__', 'constructor', 'prototype'].includes(name)) {
+        alert('A country with this name already exists. Choose a unique name.');
+        return;
+      }
 
       const rawGeometry = {
         type: 'Polygon' as const,
@@ -393,10 +416,10 @@ function App() {
             const difference = turf.difference(turf.featureCollection([otherFeature, newFeature]));
 
             if (!difference) {
-              countriesToAbsorb.push(updatedEdits[countryName]?.name ?? countryName);
+              countriesToAbsorb.push(countryName);
             } else {
               updatedEdits[countryName] = {
-                ...updatedEdits[countryName] ?? { name: countryName, color: '#dcdcdc' },
+                ...updatedEdits[countryName] ?? { name: countryName, color: countriesByName.get(countryName)?.properties?.customColor ?? '#dcdcdc' },
                 geometry: difference.geometry
               };
             }
@@ -412,7 +435,7 @@ function App() {
           if (!confirmed) return;
           countriesToAbsorb.forEach(absorbedName => {
             updatedEdits[absorbedName] = {
-              ...updatedEdits[absorbedName] ?? { name: absorbedName, color: '#dcdcdc' },
+              ...updatedEdits[absorbedName] ?? { name: absorbedName, color: countriesByName.get(absorbedName)?.properties?.customColor ?? '#dcdcdc' },
               geometry: null
             };
           });
@@ -434,13 +457,10 @@ function App() {
 
     const feature = e.features?.[0];
     if (feature) {
+      if (!confirmDiscardDraft()) return;
       const name = feature.properties?.name;
       setEditingCountry(name);
       setSelectedCountry(name);
-      setCountryEdits(prev => ({
-        ...prev,
-        [name]: prev[name] ?? { name, color: '#dcdcdc' }
-      }));
       const isNewCountry = !countriesByName.has(name);
       const geometry = isNewCountry
         ? countryEdits[name]?.geometry
@@ -450,7 +470,7 @@ function App() {
         [name]: geometry
       }));
     }
-  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons]);
+  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesByName, countriesData, confirmDiscardDraft]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
@@ -465,14 +485,14 @@ function App() {
     setCountryEdits(prev => ({
       ...prev,
       [selectedCountry]: {
-        ...prev[selectedCountry] ?? { name: selectedCountry, color: '#dcdcdc' },
+        ...prev[selectedCountry] ?? { name: selectedCountry, color: countriesByName.get(selectedCountry)?.properties?.customColor ?? '#dcdcdc' },
         geometry: null
       }
     }));
     setSelectedCountry(null);
     setEditingCountry(null);
     setEditMode(null);
-  }, [selectedCountry]);
+  }, [selectedCountry, countriesByName]);
 
   const handleStartAbsorb = useCallback(() => {
     setAbsorbingCountry(selectedCountry);
@@ -482,141 +502,143 @@ function App() {
     setAbsorbingCountry(null);
   }, []);
 
-  const handleSave = useCallback(async () => {
-    const editsToSave = Object.fromEntries(
-      Object.entries(countryEdits).map(([name, data]) => [
-        name,
-        { ...data, geometry: data.geometry ?? null }
-      ])
-    );
-
-    if (currentWorldId) {
-      await api.updateWorld(currentWorldId, {
-        name: currentWorldName!,
-        edits: editsToSave,
-        background_image: backgroundImage,
-        background_bounds: backgroundBounds
-      });
-      alert('World saved!');
-    } else {
-      const name = prompt('Name your world:');
-      if (!name) return;
-      const created = await api.createWorld({
-        name,
-        edits: editsToSave,
-        background_image: backgroundImage,
-        background_bounds: backgroundBounds
-      });
-      setCurrentWorldId(created.id!);
-      setCurrentWorldName(created.name);
-      alert('World saved!');
+  const handleSave = useCallback(async (): Promise<boolean> => {
+    if (savingRef.current) return false;
+    if (hasDraftChanges) {
+      alert('Finish the territory edit with Done (or finish the new polygon) before saving.');
+      return false;
     }
-  }, [currentWorldId, currentWorldName, countryEdits, backgroundImage, backgroundBounds]);
+    const name = currentWorldId ? currentWorldName! : prompt('Name your world:')?.trim();
+    if (!name) return false;
+    savingRef.current = true;
+    setIsSaving(true);
+    try {
+      const payload = worldPayload(name, project);
+      const saved = currentWorldId
+        ? await api.updateWorld(currentWorldId, payload)
+        : await api.createWorld(payload);
+      setCurrentWorldId(saved.id!);
+      setCurrentWorldName(saved.name);
+      setSavedProject(project);
+      const isCurrent = latestProject.current.project === project && !latestProject.current.hasDraftChanges;
+      alert(isCurrent ? 'World saved!' : 'World saved. Newer changes are still unsaved.');
+      return isCurrent;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not save the world.');
+      return false;
+    } finally {
+      savingRef.current = false;
+      setIsSaving(false);
+    }
+  }, [currentWorldId, currentWorldName, project, hasDraftChanges]);
 
-  const handleLoad = useCallback((world: WorldData) => {
-    setCountryEdits(world.edits);
-    setCurrentWorldId(world.id!);
-    setCurrentWorldName(world.name);
-    setShowWorldsPanel(false);
+  const confirmDiscardUnsavedChanges = useCallback(async () => {
+    if (savingRef.current) return false;
+    return confirmReplacement(hasUnsavedChanges, message => window.confirm(message), handleSave);
+  }, [hasUnsavedChanges, handleSave]);
+  const confirmCurrentChanges = useRef(confirmDiscardUnsavedChanges);
+  useEffect(() => { confirmCurrentChanges.current = confirmDiscardUnsavedChanges; }, [confirmDiscardUnsavedChanges]);
+
+  const resetEditing = useCallback(() => {
     setSelectedCountry(null);
-    setHasUnsavedChanges(false);
-    setBackgroundImage(world.background_image ?? null);
-    setBackgroundBounds(world.background_bounds ?? null);
-
-    const geometries: Record<string, Geometry> = {};
-    Object.entries(world.edits).forEach(([name, data]) => {
-      if (data.geometry) {
-        geometries[name] = data.geometry;
-      }
-    });
-    setEditedGeometries(geometries);
+    setHoveredCountry(null);
+    setEditingCountry(null);
+    setEditMode(null);
+    setEditedGeometries({});
+    setDrawingPoints([]);
+    setNewCountryPoints([]);
+    setIsAddingCountry(false);
+    setDraggingVertex(null);
+    setAbsorbingCountry(null);
   }, []);
 
+  const handleLoad = useCallback(async (world: WorldData) => {
+    try {
+      const request = ++loadRequest.current;
+      if (!await confirmCurrentChanges.current()) return;
+      const revision = latestProject.current.revision;
+      // Refresh after a possible save; the panel may hold an older copy of this world.
+      const fresh = await api.getWorld(world.id!);
+      if (request !== loadRequest.current) return;
+      if (latestProject.current.revision !== revision) {
+        alert('The world was not loaded because you made new changes. Try loading it again.');
+        return;
+      }
+      const restored = restoreWorld(fresh, defaultCountriesDataRaw);
+      const { land, sea } = splitSeaFeatures(restored.base_map!);
+      setBaseMap(restored.base_map!);
+      setCountriesData(land);
+      setSeaPolygons(sea);
+      setCountryEdits(restored.edits);
+      setCurrentWorldId(fresh.id!);
+      setCurrentWorldName(fresh.name);
+      setBackgroundImage(restored.background_image);
+      setBackgroundBounds(restored.background_bounds);
+      setAllowOverlapping(restored.allow_overlapping);
+      setSavedProject(restored);
+      resetEditing();
+      setShowWorldsPanel(false);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not load this world.');
+    }
+  }, [resetEditing]);
+
   const handleUploadBackgroundImage = useCallback(async (file: File) => {
-    const { url } = await api.uploadBackgroundImage(file);
+    try {
+      const { url } = await api.uploadBackgroundImage(file);
 
-    const map = mapRef.current?.getMap();
-    const bounds = map?.getBounds();
+      const map = mapRef.current?.getMap();
+      const bounds = map?.getBounds();
 
-    const nextBounds: BackgroundBounds = bounds
-      ? [
-          [bounds.getWest(), bounds.getNorth()],
-          [bounds.getEast(), bounds.getNorth()],
-          [bounds.getEast(), bounds.getSouth()],
-          [bounds.getWest(), bounds.getSouth()]
-        ]
-      : [
-          [-180, 85],
-          [180, 85],
-          [180, -85],
-          [-180, -85]
-        ];
+      const nextBounds: BackgroundBounds = bounds
+        ? [
+            [bounds.getWest(), bounds.getNorth()],
+            [bounds.getEast(), bounds.getNorth()],
+            [bounds.getEast(), bounds.getSouth()],
+            [bounds.getWest(), bounds.getSouth()]
+          ]
+        : [
+            [-180, 85],
+            [180, 85],
+            [180, -85],
+            [-180, -85]
+          ];
 
-    setBackgroundImage(url);
-    setBackgroundBounds(nextBounds);
-    setHasUnsavedChanges(true);
+      setBackgroundImage(url);
+      setBackgroundBounds(nextBounds);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not upload the background.');
+    }
   }, []);
 
   const handleResetBackgroundImage = useCallback(() => {
     setBackgroundImage(null);
     setBackgroundBounds(null);
-    setHasUnsavedChanges(true);
   }, []);
 
-  const confirmDiscardUnsavedChanges = useCallback(async () => {
-    if (!hasUnsavedChanges) return true;
-
-    const shouldSave = window.confirm('You have unsaved changes. Save before continuing?');
-    if (shouldSave) {
-      await handleSave();
-      return true;
-    }
-
-    return window.confirm('Discard unsaved changes and continue anyway?');
-  }, [hasUnsavedChanges, handleSave]);
-
   const handleImportCountries = useCallback(async (file: File) => {
-    const proceed = await confirmDiscardUnsavedChanges();
-    if (!proceed) return;
-
-    const text = await file.text();
-    let parsed: FeatureCollection;
     try {
-      parsed = JSON.parse(text) as FeatureCollection;
-    } catch {
-      alert('That file is not valid JSON.');
-      return;
+      const request = ++loadRequest.current;
+      // Validate before asking to discard anything.
+      const normalized = normalizeBaseMap(JSON.parse(await file.text()));
+      if (request !== loadRequest.current || !await confirmCurrentChanges.current()) return;
+      if (request !== loadRequest.current) return;
+      const { land, sea } = splitSeaFeatures(normalized);
+      setBaseMap(normalized);
+      setCountriesData(land);
+      setSeaPolygons(sea);
+      setCountryEdits({});
+      setCurrentWorldId(null);
+      setCurrentWorldName(null);
+      setBackgroundImage(null);
+      setBackgroundBounds(null);
+      setAllowOverlapping(false);
+      resetEditing();
+      // Keep the old baseline: an imported map is a new, unsaved project.
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not import this map.');
     }
-
-    if (parsed.type !== 'FeatureCollection' || !Array.isArray(parsed.features)) {
-      alert('Expected a GeoJSON FeatureCollection. Export the current map to see the expected format.');
-      return;
-    }
-
-    const normalized: FeatureCollection = {
-      ...parsed,
-      features: parsed.features.map((feature, index) => ({
-        ...feature,
-        properties: {
-          ...feature.properties,
-          name: feature.properties?.name ?? `country-${index + 1}`
-        }
-      }))
-    };
-
-    const { land, sea } = splitSeaFeatures(normalized);
-
-    setCountriesData(land);
-    setSeaPolygons(sea);
-    setCountryEdits({});
-    setEditedGeometries({});
-    setSelectedCountry(null);
-    setEditingCountry(null);
-    setEditMode(null);
-    setCurrentWorldId(null);
-    setCurrentWorldName(null);
-    setHasUnsavedChanges(false);
-  }, [confirmDiscardUnsavedChanges]);
+  }, [resetEditing]);
 
 
   const handleDoneEditing = useCallback(() => {
@@ -671,10 +693,10 @@ function App() {
             const difference = turf.difference(turf.featureCollection([otherFeature, newGeometry]));
 
             if (!difference) {
-              countriesToAbsorb.push(countryEdits[name]?.name ?? name);
+              countriesToAbsorb.push(name);
             } else {
               updatedEdits[name] = {
-                ...updatedEdits[name] ?? { name, color: '#dcdcdc' },
+                ...updatedEdits[name] ?? { name, color: countriesByName.get(name)?.properties?.customColor ?? '#dcdcdc' },
                 geometry: difference.geometry
               };
             }
@@ -690,14 +712,14 @@ function App() {
           if (!confirmed) return;
           countriesToAbsorb.forEach(name => {
             updatedEdits[name] = {
-              ...updatedEdits[name] ?? { name, color: '#dcdcdc' },
+              ...updatedEdits[name] ?? { name, color: countriesByName.get(name)?.properties?.customColor ?? '#dcdcdc' },
               geometry: null
             };
           });
         }
 
         updatedEdits[editingCountry] = {
-          ...countryEdits[editingCountry] ?? { name: editingCountry, color: '#dcdcdc' },
+          ...countryEdits[editingCountry] ?? { name: editingCountry, color: countriesByName.get(editingCountry)?.properties?.customColor ?? '#dcdcdc' },
           geometry
         };
 
@@ -706,7 +728,10 @@ function App() {
         setCountryEdits(prev => ({
           ...prev,
           [editingCountry]: {
-            ...prev[editingCountry],
+            ...prev[editingCountry] ?? {
+              name: editingCountry,
+              color: countriesByName.get(editingCountry)?.properties?.customColor ?? '#dcdcdc',
+            },
             geometry
           }
         }));
@@ -716,7 +741,7 @@ function App() {
     setEditingCountry(null);
     setEditMode(null);
     setDrawingPoints([]);
-  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping, seaPolygons]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping, seaPolygons, countriesByName, countriesData]);
 
   const modifiedGeoJSON = useMemo(() => ({
     ...countriesData,
@@ -736,11 +761,11 @@ function App() {
           properties: {
             ...feature.properties,
             ...(edit?.properties || {}),
-            customColor: edit?.color ?? '#dcdcdc'
+            customColor: edit?.color ?? feature.properties?.customColor ?? '#dcdcdc'
           }
         };
       })
-  }), [countryEdits]);
+  }), [countryEdits, countriesData]);
 
   const editingVertices = useMemo(() => {
     if (!editingCountry) return null;
@@ -810,7 +835,7 @@ function App() {
         })) : [])
       ]
     };
-  }, [editingCountry, editedGeometries, countryEdits, editMode, drawingPoints]);
+  }, [editingCountry, editedGeometries, countryEdits, editMode, drawingPoints, countriesByName]);
 
   const editingCountryData = useMemo(() => {
     if (!editingCountry) return null;
@@ -836,12 +861,12 @@ function App() {
         type: 'Feature' as const,
         properties: {
           name: editingCountry,
-          customColor: countryEdits[editingCountry]?.color ?? '#dcdcdc'
+          customColor: countryEdits[editingCountry]?.color ?? countriesByName.get(editingCountry)?.properties?.customColor ?? '#dcdcdc'
         },
         geometry
       }]
     };
-  }, [editingCountry, editedGeometries, drawingPoints, countryEdits]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, countriesByName]);
 
   const newCountryData = useMemo(() => {
     if (!isAddingCountry || newCountryPoints.length === 0) return null;
@@ -878,8 +903,12 @@ function App() {
   }), [modifiedGeoJSON, newCountries]);
 
   const handleExportCountries = useCallback(() => {
-    downloadJSON(allCountriesData, 'countries.geojson');
-  }, [allCountriesData]);
+    if (hasDraftChanges) {
+      alert('Finish the territory edit before exporting.');
+      return;
+    }
+    downloadJSON(exportMap(baseMap, countryEdits), 'countries.geojson');
+  }, [baseMap, countryEdits, hasDraftChanges]);
 
 
   const onVertexMouseDown = useCallback((e: MapLayerMouseEvent, feature: VertexFeature) => {
@@ -948,7 +977,7 @@ function App() {
       );
       return { ...prev, [editingCountry]: updated };
     });
-  }, [draggingVertex, editingCountry, seaPolygons]);
+  }, [draggingVertex, editingCountry, countriesByName]);
 
   const onMouseUp = useCallback(() => {
     setDraggingVertex(null);
@@ -976,7 +1005,7 @@ function App() {
 
       return { ...prev, [editingCountry]: updated };
     });
-  }, [editingCountry]);
+  }, [editingCountry, countriesByName]);
 
   const handleDeleteDrawingPoint = useCallback((vertexIndex: number) => {
     setDrawingPoints(prev => prev.filter((_, i) => i !== vertexIndex));
@@ -1050,9 +1079,10 @@ function App() {
     >
       <Navbar
         onSave={handleSave}
+        isSaving={isSaving}
+        hasUnsavedChanges={hasUnsavedChanges}
         onMyWorlds={() => {
           setShowWorldsPanel(prev => !prev);
-          setSelectedCountry(null);
         }}
         allowOverlapping={allowOverlapping}
         onToggleOverlapping={() => setAllowOverlapping(prev => !prev)}
@@ -1060,10 +1090,12 @@ function App() {
       <Sidebar
         isAddingCountry={isAddingCountry}
         onToggleAddCountry={() => {
+          if (!confirmDiscardDraft()) return;
           setIsAddingCountry(prev => !prev);
           setNewCountryPoints([]);
           setDrawingPoints([]);
           setEditMode(null);
+          setEditingCountry(null);
         }}
         onImportCountries={handleImportCountries}
         onExportCountries={handleExportCountries}
@@ -1224,16 +1256,23 @@ function App() {
       {showWorldsPanel && (
         <WorldsPanel
           onLoad={handleLoad}
+          currentWorldId={currentWorldId}
+          busy={isSaving}
+          onDeleteCurrent={() => { setCurrentWorldId(null); setCurrentWorldName(null); setSavedProject(initialProject); }}
           onClose={() => setShowWorldsPanel(false)}
         />
       )}
 
-      {!showWorldsPanel && selectedCountry && countryEdits[selectedCountry] && (
+      {!showWorldsPanel && selectedCountry && (
         <CountryPanel
           countryName={selectedCountry}
-          data={countryEdits[selectedCountry]}
+          data={countryEdits[selectedCountry] ?? {
+            name: selectedCountry,
+            color: countriesByName.get(selectedCountry)?.properties?.customColor ?? '#dcdcdc',
+          }}
           onChange={handlePanelChange}
           onClose={() => {
+            if (!confirmDiscardDraft()) return;
             setSelectedCountry(null);
             setEditingCountry(null);
             setEditMode(null);

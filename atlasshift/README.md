@@ -33,6 +33,7 @@ Open [http://localhost:5173](http://localhost:5173). Restart the development ser
 ## Commands
 
 - `npm run lint` checks the source code with ESLint.
+- `npm test` runs regression tests for editor state, persistence, GeoJSON exchange, and HTTP errors using Node's built-in test runner.
 - `npm run build` type-checks the project and creates a production build in `dist/`.
 - `npm run preview` serves the production build locally. The backend must be started separately, and CORS must allow the preview origin.
 

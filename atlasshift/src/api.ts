@@ -1,67 +1,25 @@
-import type { Geometry, GeoJsonProperties } from 'geojson';
+import { requestJSON } from './http';
+import type { WorldData } from './world';
+export type { WorldData, BackgroundBounds } from './world';
 
-const BASE_URL = import.meta.env.VITE_API_URL;
-
-export type BackgroundBounds = [
-  [number, number],
-  [number, number],
-  [number, number],
-  [number, number]
-];
-
-export interface WorldData {
-  id?: number;
-  name: string;
-  edits: Record<string, { name: string; color: string; geometry?: Geometry | null; properties?: GeoJsonProperties }>;
-  background_image?: string | null;
-  background_bounds?: BackgroundBounds | null;
-}
-
-function resolveUrl(url: string): string {
-  if (/^https?:\/\//i.test(url)) return url;
-  return `${BASE_URL}${url}`;
-}
+const BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
 export const api = {
-  async getWorlds(): Promise<WorldData[]> {
-    const res = await fetch(`${BASE_URL}/worlds`);
-    return res.json();
-  },
-
-  async createWorld(data: WorldData): Promise<WorldData> {
-    const res = await fetch(`${BASE_URL}/worlds`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    return res.json();
-  },
-
-  async updateWorld(id: number, data: WorldData): Promise<WorldData> {
-    const res = await fetch(`${BASE_URL}/worlds/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    return res.json();
-  },
-
-  async deleteWorld(id: number): Promise<void> {
-    await fetch(`${BASE_URL}/worlds/${id}`, { method: 'DELETE' });
-  },
-
+  getWorlds: () => requestJSON<WorldData[]>(`${BASE_URL}/worlds`),
+  getWorld: (id: number) => requestJSON<WorldData>(`${BASE_URL}/worlds/${id}`),
+  createWorld: (data: WorldData) => requestJSON<WorldData>(`${BASE_URL}/worlds`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+  }),
+  updateWorld: (id: number, data: WorldData) => requestJSON<WorldData>(`${BASE_URL}/worlds/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+  }),
+  deleteWorld: (id: number) => requestJSON<void>(`${BASE_URL}/worlds/${id}`, { method: 'DELETE' }),
   async uploadBackgroundImage(file: File): Promise<{ url: string }> {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${BASE_URL}/uploads/background-image`, {
-      method: 'POST',
-      body: formData
+    const data = await requestJSON<{ url: string }>(`${BASE_URL}/uploads/background-image`, {
+      method: 'POST', body: formData,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
-      throw new Error(err.detail ?? 'Upload failed');
-    }
-    const data = await res.json();
-    return { url: resolveUrl(data.url) };
-  }
+    return { url: /^https?:\/\//i.test(data.url) ? data.url : `${BASE_URL}${data.url}` };
+  },
 };
