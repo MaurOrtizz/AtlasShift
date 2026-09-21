@@ -6,7 +6,7 @@ interface CountryData {
 }
 
 interface CountryPanelProps {
-  countryName: string;
+  countryId: string;
   data: CountryData;
   onChange: (data: CountryData) => void;
   onClose: () => void;
@@ -33,14 +33,8 @@ const buttonStyle = (bg: string) => ({
 });
 
 
-function CountryPanel({ countryName, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing, isAbsorbing, onStartAbsorb, onCancelAbsorb, onDeleteCountry }: CountryPanelProps) {  
+function CountryPanel({ countryId, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing, isAbsorbing, onStartAbsorb, onCancelAbsorb, onDeleteCountry }: CountryPanelProps) {
   const [localColor, setLocalColor] = useState(data.color);
-  const [renderedCountryName, setRenderedCountryName] = useState(countryName);
-
-  if (countryName !== renderedCountryName) {
-    setRenderedCountryName(countryName);
-    setLocalColor(data.color);
-  }
 
   return (
     <div style={{
@@ -95,13 +89,13 @@ function CountryPanel({ countryName, data, onChange, onClose, editingCountry, ed
         {isAbsorbing ? (
           <>
             <p style={{ fontSize: 13, color: '#444', margin: 0 }}>
-              Click another country on the map to absorb {countryName} into it.
+              Click another country on the map to absorb {data.name} into it.
             </p>
             <button onClick={onCancelAbsorb} style={buttonStyle('#6b7280')}>
               Cancel
             </button>
           </>
-        ) : editingCountry !== countryName ? (
+        ) : editingCountry !== countryId ? (
           <>
             <button onClick={onEnterEditMode} style={buttonStyle('#4f46e5')}>
               Edit Borders

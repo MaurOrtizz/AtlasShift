@@ -4,6 +4,8 @@ This directory contains the web interface for AtlasShift, an interactive politic
 
 The editor lets users customize countries, redraw borders, create or absorb territories, and import or export GeoJSON. The **My Worlds** panel communicates with the FastAPI backend to manage saved scenarios.
 
+Countries use stable GeoJSON feature IDs independently of their display names. `src/world.ts` handles ID assignment, legacy-save conversion, version 2 snapshots, and GeoJSON export. The same IDs drive selection and geometry editing, so duplicate names remain independent. This is the foundation for future country subdivisions; parent relationships and subdivision tools are still planned.
+
 See the [main README](../README.md) for the complete project overview, backend setup, Docker instructions, usage guide, limitations, and roadmap.
 
 ## Development

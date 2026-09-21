@@ -12,6 +12,7 @@ The project combines visual editing with real geographic operations. Borders are
 
 - **Redraw borders:** move, insert, and remove territory vertices directly on the map.
 - **Create countries:** draw a polygon, assign a name, and choose a custom color.
+- **Keep territory identity:** stable IDs preserve each country through renames, saves, and GeoJSON exchange, even when multiple countries share a display name.
 - **Expand and merge territories:** add land to a country or absorb one nation into another.
 - **Control overlaps:** allow overlapping territories or automatically trim affected countries. AtlasShift asks for confirmation before a country is completely absorbed.
 - **Keep territories out of the sea:** new polygons are clipped against features identified as sea in the loaded dataset.
@@ -72,7 +73,7 @@ cd server
 
 Starting the server from `server/` makes SQLite use `server/atlasshift.db`. The database and its tables are created automatically when the API starts.
 
-Existing databases receive an additive migration on startup to store complete project snapshots. Existing rows are preserved. Version 1 worlds include the base map (including sea features), edits, background metadata, and overlap settings. Legacy worlds still load against the bundled default map; previously missing custom base maps or geometries cannot be reconstructed automatically. Back up an existing database before upgrading.
+Existing databases receive an additive migration on startup to store complete project snapshots. Existing rows are preserved. Version 2 worlds include the base map (including sea features), edits keyed by stable territory IDs, background metadata, and overlap settings. Version 0 and 1 worlds are converted in memory when opened and upgraded on the next successful save. Version 0 worlds without a base map load against the bundled default map; previously missing custom base maps or geometries cannot be reconstructed automatically. Back up an existing database before upgrading.
 
 ### 2. Frontend
 
@@ -102,10 +103,10 @@ Open [http://localhost:5173](http://localhost:5173). The backend currently allow
 1. **Select a country** with a single click. Use the side panel to rename it or choose a color; leave the color picker to apply the new color.
 2. Select **Edit Borders → Edit Vertices**. Drag a point to move the border, click a border segment to insert a point, or right-click a vertex to remove it. Select **Done** when finished.
 3. To add territory to the selected country, use **Edit Borders → Draw Territory**, place the polygon points, and select **Done** once the shape has at least three points.
-4. To create a country, select **Add Polygon** from the toolbar, place at least three points, and double-click to finish. Enter a unique country name when prompted.
+4. To create a country, select **Add Polygon** from the toolbar, place at least three points, and double-click to finish. Enter a country name when prompted. Names can repeat; each country has its own permanent ID.
 5. To merge countries, select the country that will be absorbed, choose **Absorb Into...**, click the receiving country, and confirm the operation.
 6. Finish any active territory edit, then select **Save** and name the world. It can then be opened from **My Worlds**. Unsaved work is checked before importing or switching worlds; cancelling or failing a save stops that action. Closing the tab also warns about pending changes.
-7. Use **Export Countries GeoJSON** to download `countries.geojson`. **Import Countries GeoJSON** accepts a GeoJSON `FeatureCollection`; country features should use `Polygon` or `MultiPolygon` geometries and unique names in `properties.name`.
+7. Use **Export Countries GeoJSON** to download `countries.geojson`. **Import Countries GeoJSON** accepts a GeoJSON `FeatureCollection`; country features should use `Polygon` or `MultiPolygon` geometries and non-empty names in `properties.name`. Existing feature IDs must be unique. Missing IDs are generated during import, and numeric IDs become strings. Export preserves those IDs, so renaming a country does not change its identity.
 
 The **Allow Overlapping** switch controls whether countries may cover the same area. When it is disabled, a new border can trim neighboring countries, so inspect the result before saving.
 
@@ -141,7 +142,17 @@ Run the frontend commands from `atlasshift/`:
 | `npm run build` | Type-check the project and create a production build in `dist/`. |
 | `npm run preview` | Serve the production build locally; this does not start the backend. |
 
-The API exposes `GET /worlds`, `GET /worlds/{id}`, `POST /worlds`, `PUT /worlds/{id}`, and `DELETE /worlds/{id}`. Version 1 create and update requests contain `name`, `edits`, `schema_version: 1`, and a GeoJSON `base_map`; optional fields store background metadata and overlap settings. In an edit, an omitted `geometry` preserves the base geometry, while `geometry: null` explicitly deletes the country. Legacy payloads can still create legacy worlds, but cannot overwrite version 1 worlds. With the server running, use the [interactive FastAPI documentation](http://localhost:8000/docs) to inspect and test these operations.
+The API exposes `GET /worlds`, `GET /worlds/{id}`, `POST /worlds`, `PUT /worlds/{id}`, and `DELETE /worlds/{id}`. Version 2 create and update requests contain `name`, `edits`, `schema_version: 2`, and a GeoJSON `base_map`; optional fields store background metadata and overlap settings. Each base feature has a unique non-empty string `id`. The `edits` object uses these IDs as keys, and each edit includes a `name` and `color`. New countries use a new ID and include polygon geometry. In an edit, an omitted `geometry` preserves the base geometry, while `geometry: null` explicitly deletes the country. The API validates IDs, names, and polygon coordinates before storing version 2 worlds. Legacy payloads can still create legacy worlds, but cannot overwrite a world saved with a newer schema version. With the server running, use the [interactive FastAPI documentation](http://localhost:8000/docs) to inspect and test these operations.
+
+For example, renaming the feature with `id: "country-a"` stores an edit under `"country-a"`, regardless of its old or new name:
+
+```json
+{
+  "country-a": { "name": "New display name", "color": "#123456" }
+}
+```
+
+Loading older worlds maps their name-based edits to feature IDs, including custom countries and explicit deletions. Exact duplicate features without IDs are removed from legacy maps; distinct same-name features and sea masks are retained. When several distinct legacy features share a name, the old edit applies to each, preserving the previous name-based behavior. New imports keep same-name features independent.
 
 Run backend tests from the repository root with the Python interpreter from your virtual environment:
 
@@ -149,7 +160,7 @@ Run backend tests from the repository root with the Python interpreter from your
 python -m unittest discover -s server -p "test_*.py" -v
 ```
 
-The backend tests use isolated in-memory databases, including a legacy-schema migration test; they do not change saved worlds. Frontend tests cover editor state transitions, save cancellation, concurrent edits, HTTP failures, project round trips, and GeoJSON validation.
+The backend tests use isolated in-memory databases, including legacy-schema migration, stable-ID validation, and downgrade protection; they do not change saved worlds. Frontend tests cover editor state transitions, save cancellation, concurrent edits, HTTP failures, project round trips, GeoJSON validation, duplicate display names, and territory identity through creation, renaming, absorption, and deletion.
 
 GitHub Actions runs both test suites, lints and builds the frontend, and builds both Docker images. Pushes to `main` publish the `atlasshift-frontend` and `atlasshift-backend` images to GHCR. To build the production frontend image manually, provide the API URL through the `VITE_API_URL` build argument; Vite embeds this value during compilation.
 
@@ -164,5 +175,7 @@ GitHub Actions runs both test suites, lints and builds the frontend, and builds 
 ## Roadmap
 
 Future versions of AtlasShift are planned to support country subdivisions such as states, provinces, regions, and departments. This will include creating and editing internal borders, assigning subdivision names and colors, and managing them independently while preserving their relationship with the parent country.
+
+Stable territory IDs are now in place as the first prerequisite. Parent-country relationships and subdivision editing tools are not implemented yet.
 
 Other planned improvements include stronger project persistence, complete custom-background support, and undo/redo tools for safer scenario exploration.

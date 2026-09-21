@@ -89,9 +89,78 @@ class WorldAPITests(unittest.TestCase):
         self.assertEqual(self.request("GET", path)[1]["base_map"], self.project()["base_map"])
 
     def test_invalid_version_map_and_name_are_rejected(self):
-        for changes in [{"schema_version": 2}, {"base_map": None}, {"base_map": {}}, {"name": "  "}]:
+        for changes in [{"schema_version": 3}, {"base_map": None}, {"base_map": {}}, {"name": "  "}]:
             with self.subTest(changes=changes):
                 self.assertEqual(self.request("POST", "/worlds", {**self.project(), **changes})[0], 422)
+
+    def stable_project(self):
+        payload = self.project()
+        payload["schema_version"] = 2
+        payload["base_map"]["features"][0]["id"] = "country-a"
+        payload["base_map"]["features"][1]["id"] = "sea-mask"
+        payload["edits"] = {"country-a": {"name": "Renamed", "color": "#123456"}}
+        return payload
+
+    def test_stable_ids_round_trip_with_duplicate_names_and_deleted_country(self):
+        payload = self.stable_project()
+        payload["base_map"]["features"].append({**payload["base_map"]["features"][0], "id": "country-b"})
+        payload["edits"]["country-b"] = {"name": "Renamed", "color": "#abcdef", "geometry": None}
+        payload["edits"]["new-country"] = {
+            "name": "Renamed", "color": "#ffffff", "geometry": payload["base_map"]["features"][0]["geometry"],
+        }
+        status, created = self.request("POST", "/worlds", payload)
+        self.assertEqual(status, 200)
+        path = f'/worlds/{created["id"]}'
+        loaded = self.request("GET", path)[1]
+        self.assertEqual({key: loaded[key] for key in payload}, payload)
+        payload["edits"]["country-a"]["name"] = "Renamed again"
+        self.assertEqual(self.request("PUT", path, payload)[0], 200)
+        self.assertEqual(self.request("GET", path)[1]["edits"], payload["edits"])
+
+    def test_version_2_upgrades_old_worlds_and_blocks_downgrades(self):
+        for original in [{"name": "Legacy", "edits": {}}, self.project()]:
+            status, created = self.request("POST", "/worlds", original)
+            self.assertEqual(status, 200)
+            path = f'/worlds/{created["id"]}'
+            upgraded = self.stable_project()
+            self.assertEqual(self.request("PUT", path, upgraded)[0], 200)
+            for old in [{"name": "Legacy client", "edits": {}}, self.project()]:
+                self.assertEqual(self.request("PUT", path, old)[0], 409)
+                loaded = self.request("GET", path)[1]
+                self.assertEqual({key: loaded[key] for key in upgraded}, upgraded)
+
+    def test_version_2_rejects_invalid_ids_geometry_and_edits_without_changing_saved_world(self):
+        _, created = self.request("POST", "/worlds", self.stable_project())
+        path = f'/worlds/{created["id"]}'
+        invalid = []
+        for feature_id in [None, "", "  ", 0, "__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty", "sea-mask"]:
+            payload = self.stable_project()
+            payload["base_map"]["features"][0]["id"] = feature_id
+            invalid.append(payload)
+        payload = self.stable_project()
+        del payload["base_map"]["features"][0]["id"]
+        invalid.append(payload)
+        for edits in [
+            {"country-a": None}, {"country-a": {"name": "", "color": "#fff"}},
+            {"country-a": {"name": "No color"}}, {"new-country": {"name": "No geometry", "color": "#fff"}},
+            {"__proto__": {"name": "Bad ID", "color": "#fff", "geometry": None}},
+        ]:
+            invalid.append({**self.stable_project(), "edits": edits})
+        for geometry in [None, {}, {"type": "Point", "coordinates": [0, 0]},
+                         {"type": "Polygon", "coordinates": []},
+                         {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1]]]},
+                         {"type": "Polygon", "coordinates": [[[True, 0], [1, 0], [1, 1], [True, 0]]]}]:
+            payload = self.stable_project()
+            payload["base_map"]["features"][0]["geometry"] = geometry
+            invalid.append(payload)
+            if geometry is not None:
+                payload = self.stable_project()
+                payload["edits"]["country-a"]["geometry"] = geometry
+                invalid.append(payload)
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                self.assertEqual(self.request("PUT", path, payload)[0], 422)
+                self.assertEqual(self.request("GET", path)[1], created)
 
     def test_missing_world_returns_404(self):
         for method in ["GET", "PUT", "DELETE"]:

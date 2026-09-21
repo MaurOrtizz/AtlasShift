@@ -7,7 +7,7 @@ import * as world from '../src/world.ts';
 
 const require = createRequire(import.meta.url);
 const geometry = { type: 'Polygon', coordinates: [[[0,0],[2,0],[2,2],[0,0]]] };
-const base = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: { name: 'Original' }, geometry }] };
+const base = { type: 'FeatureCollection', features: [{ type: 'Feature', id: 'country-a', properties: { name: 'Original' }, geometry }] };
 const code = ts.transpileModule(fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
 }).outputText;
@@ -21,6 +21,7 @@ function editor() {
   const notices = [];
   const prompts = [];
   const confirmations = [];
+  const confirmationMessages = [];
   const calls = [];
   const stored = new Map();
   const listeners = new Map();
@@ -59,7 +60,7 @@ function editor() {
   }
   const exports = {};
   new Function('require', 'exports', 'window', 'alert', 'prompt', code)(load, exports, {
-    confirm: message => { const value = confirmations.shift(); assert.notEqual(value, undefined, message); return value; },
+    confirm: message => { confirmationMessages.push(message); const value = confirmations.shift(); assert.notEqual(value, undefined, message); return value; },
     addEventListener: (event, callback) => listeners.set(event, callback),
     removeEventListener: event => listeners.delete(event),
   }, message => notices.push(message), () => prompts.shift() ?? null);
@@ -72,12 +73,14 @@ function editor() {
     }
     return walk(tree);
   }
-  function select() {
-    get('Map').onClick({ originalEvent: { detail: 1 }, features: [{ properties: { name: 'Original' }, layer: { id: 'countries-fill' } }] });
+  function select(id = 'country-a') {
+    const feature = get('Source').data.features.find(f => f.id === id);
+    assert.ok(feature, `Missing rendered territory ${id}`);
+    get('Map').onClick({ originalEvent: { detail: 1 }, features: [{ ...feature, layer: { id: 'countries-fill' } }] });
     render();
   }
   render();
-  return { render, get, select, api, calls, stored, prompts, confirmations, notices, listeners };
+  return { render, get, select, api, calls, stored, prompts, confirmations, confirmationMessages, notices, listeners };
 }
 
 test('selection stays clean and saving a name/color change does not delete the country', async () => {
@@ -91,7 +94,7 @@ test('selection stays clean and saving a name/color change does not delete the c
   assert.equal(await e.get('Navbar').onSave(), true); e.render();
   assert.equal(e.get('Navbar').hasUnsavedChanges, false);
   assert.equal(e.listeners.has('beforeunload'), false);
-  assert.equal(Object.hasOwn(e.calls[0].edits.Original, 'geometry'), false);
+  assert.equal(Object.hasOwn(e.calls[0].edits['country-a'], 'geometry'), false);
   assert.deepEqual(e.calls[0].base_map, base);
 });
 
@@ -187,7 +190,86 @@ test('geometry edits preserve country identity even when overlap is allowed', as
   assert.match(e.notices.at(-1), /Finish the territory/);
   e.get('CountryPanel').onDoneEditing(); e.render();
   assert.equal(await e.get('Navbar').onSave(), true); e.render();
-  assert.equal(e.calls[0].edits.Original.name, 'Original');
-  assert.equal(e.calls[0].edits.Original.color, '#dcdcdc');
-  assert.notDeepEqual(e.calls[0].edits.Original.geometry, geometry);
+  assert.equal(e.calls[0].edits['country-a'].name, 'Original');
+  assert.equal(e.calls[0].edits['country-a'].color, '#dcdcdc');
+  assert.notDeepEqual(e.calls[0].edits['country-a'].geometry, geometry);
+});
+
+test('same-name countries remain independently selectable, editable and deletable', async () => {
+  const e = editor();
+  const otherGeometry = { type: 'Polygon', coordinates: [[[4,0],[6,0],[6,2],[4,0]]] };
+  const custom = { ...base, features: [base.features[0], { ...base.features[0], id: 'country-b', geometry: otherGeometry }] };
+  await e.get('Sidebar').onImportCountries({ text: async () => JSON.stringify(custom) }); e.render();
+  e.select('country-b');
+  assert.equal(e.get('CountryPanel').countryId, 'country-b');
+  e.get('CountryPanel').onChange({ name: 'Renamed', color: '#123456' }); e.render();
+  e.select('country-a');
+  assert.equal(e.get('CountryPanel').data.name, 'Original');
+  assert.equal(e.get('CountryPanel').data.color, '#dcdcdc');
+  e.select('country-b');
+  assert.equal(e.get('CountryPanel').data.name, 'Renamed');
+  e.confirmations.push(true);
+  e.get('CountryPanel').onDeleteCountry(); e.render();
+  assert.equal(e.confirmationMessages.at(-1), 'Delete Renamed completely?');
+  assert.deepEqual(e.get('Source').data.features.map(f => f.id), ['country-a']);
+  e.prompts.push('Independent countries'); await e.get('Navbar').onSave(); e.render();
+  assert.equal(e.calls[0].schema_version, 2);
+  assert.equal(e.calls[0].edits['country-b'].geometry, null);
+  assert.equal(e.calls[0].edits['country-a'], undefined);
+});
+
+test('renaming a new polygon preserves its geometry and reloads under the same ID', async () => {
+  const e = editor();
+  e.get('Sidebar').onToggleAddCountry(); e.render();
+  for (const [lng, lat] of [[4,0], [6,0], [6,2]]) {
+    e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
+  }
+  e.prompts.push('Original'); // A duplicate label must not overwrite the original country.
+  e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+  const created = e.get('Source').data.features.find(f => f.id !== 'country-a');
+  assert.ok(created);
+  assert.equal(created.properties.name, 'Original');
+  e.select(created.id);
+  e.get('CountryPanel').onChange({ name: 'Renamed custom', color: '#123456' }); e.render();
+  const renamed = e.get('Source').data.features.find(f => f.id === created.id);
+  assert.deepEqual(renamed.geometry, created.geometry);
+  e.prompts.push('Created country'); await e.get('Navbar').onSave(); e.render();
+  e.get('Navbar').onMyWorlds(); e.render();
+  await e.get('WorldsPanel').onLoad(e.stored.get(1)); e.render();
+  e.select(created.id);
+  assert.equal(e.get('CountryPanel').data.name, 'Renamed custom');
+  assert.deepEqual(e.get('CountryPanel').data.geometry, created.geometry);
+  assert.equal(e.get('Source').data.features.length, 2);
+});
+
+test('absorption between renamed countries uses IDs and keeps the target identity', async () => {
+  const e = editor();
+  const otherGeometry = { type: 'Polygon', coordinates: [[[2,0],[4,0],[4,2],[2,0]]] };
+  const custom = { ...base, features: [base.features[0], { ...base.features[0], id: 'country-b', geometry: otherGeometry }] };
+  await e.get('Sidebar').onImportCountries({ text: async () => JSON.stringify(custom) }); e.render();
+  e.select(); e.get('CountryPanel').onChange({ name: 'Source', color: '#111111' }); e.render();
+  e.select('country-b'); e.get('CountryPanel').onChange({ name: 'Target', color: '#222222' }); e.render();
+  e.select(); e.get('CountryPanel').onStartAbsorb(); e.render();
+  e.confirmations.push(true); e.select('country-b');
+  assert.equal(e.confirmationMessages.at(-1), 'Absorb Source into Target?');
+  const features = e.get('Source').data.features;
+  assert.equal(features.length, 1);
+  assert.equal(features[0].id, 'country-b');
+  assert.equal(features[0].properties.name, 'Target');
+  assert.equal(features[0].properties.customColor, '#222222');
+  assert.notDeepEqual(features[0].geometry, otherGeometry);
+});
+
+test('loading a version 1 world migrates name-based edits before selection and saving', async () => {
+  const e = editor();
+  e.stored.set(9, { id: 9, name: 'Legacy', schema_version: 1, base_map: base,
+    edits: { Original: { name: 'Legacy rename', color: '#123456' } },
+  });
+  e.get('Navbar').onMyWorlds(); e.render();
+  await e.get('WorldsPanel').onLoad({ id: 9 }); e.render(); e.select();
+  assert.equal(e.get('CountryPanel').data.name, 'Legacy rename');
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+  await e.get('Navbar').onSave(); e.render();
+  assert.equal(e.calls[0].schema_version, 2);
+  assert.deepEqual(Object.keys(e.calls[0].edits), ['country-a']);
 });
