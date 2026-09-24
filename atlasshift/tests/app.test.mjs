@@ -468,3 +468,137 @@ test('creating a subdivision while hidden keeps visibility off until explicitly 
   e.get('CountryPanel').onToggleSubdivisions(); e.render();
   assert.equal(visibleSubdivisions(e)[0].properties.name, 'Hidden');
 });
+
+const rectangle = (left, bottom, right, top) => turf.polygon([[
+  [left,bottom], [right,bottom], [right,top], [left,top], [left,bottom],
+]]).geometry;
+async function borderEditor({ region = rectangle(1,1,3,3), overlapping = false } = {}) {
+  const e = editor();
+  e.stored.set(20, {
+    id: 20, name: 'Borders', schema_version: 3, edits: {}, allow_overlapping: overlapping,
+    base_map: { type: 'FeatureCollection', features: [
+      { ...base.features[0], geometry: rectangle(0,0,4,4) },
+      { ...base.features[0], id: 'country-b', properties: { name: 'Neighbor' }, geometry: rectangle(4,0,6,4) },
+    ] },
+    subdivisions: {
+      region: { parent_id: 'country-a', name: 'Central', color: '#123456', geometry: region, properties: { note: 'Keep me' } },
+      neighbor: { parent_id: 'country-b', name: 'Other', color: '#abcdef', geometry: rectangle(4.5,1,5.5,3) },
+    },
+  });
+  e.get('Navbar').onMyWorlds(); e.render();
+  await e.get('WorldsPanel').onLoad({ id: 20 }); e.render();
+  e.select(); e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  return e;
+}
+function moveCountryVertex(e, vertexIndex, lng, lat) {
+  const vertex = { layer: { id: 'vertices-layer' }, properties: { index: vertexIndex, vertexIndex, polygonIndex: 0, ringIndex: 0, isDrawingPoint: false } };
+  e.get('Map').onMouseDown({ preventDefault() {}, originalEvent: { button: 0 }, features: [vertex] }); e.render();
+  e.get('Map').onMouseMove({ features: [], lngLat: { lng, lat } }); e.render();
+  e.get('Map').onMouseUp(); e.render();
+}
+function shrinkCountry(e) {
+  e.get('CountryPanel').onEnterEditMode(); e.render();
+  e.get('CountryPanel').onSetEditMode('vertices'); e.render();
+  moveCountryVertex(e, 1, 2, 0);
+  moveCountryVertex(e, 2, 2, 4);
+}
+function assertInside(subdivision, parent) {
+  assert.equal(turf.difference(turf.featureCollection([
+    turf.feature(subdivision.geometry), turf.feature(parent),
+  ])), null);
+}
+
+for (const overlapping of [false, true]) {
+  test(`shrinking a country clips its subdivisions and preserves metadata with overlapping ${overlapping}`, async () => {
+    const e = await borderEditor({ overlapping });
+    const before = visibleSubdivisions(e)[0];
+    shrinkCountry(e);
+    e.get('CountryPanel').onDoneEditing(); e.render();
+    const after = visibleSubdivisions(e)[0];
+    assert.ok(turf.area(after) < turf.area(before));
+    assertInside(after, e.get('CountryPanel').data.geometry);
+    await e.get('Navbar').onSave(); e.render();
+    const saved = e.calls.at(-1);
+    assert.equal(saved.subdivisions.region.name, 'Central');
+    assert.deepEqual(saved.subdivisions.region.properties, { note: 'Keep me' });
+    assert.deepEqual(saved.subdivisions.neighbor.geometry, rectangle(4.5,1,5.5,3));
+    e.get('Navbar').onMyWorlds(); e.render();
+    await e.get('WorldsPanel').onLoad({ id: 20 }); e.render();
+    e.select(); e.get('CountryPanel').onToggleSubdivisions(); e.render();
+    assert.deepEqual(visibleSubdivisions(e)[0].geometry, after.geometry);
+  });
+}
+
+test('cancelling subdivision loss preserves committed borders and the editable draft', async () => {
+  const e = await borderEditor({ region: rectangle(2.5,1,3.5,3) });
+  const before = visibleSubdivisions(e);
+  shrinkCountry(e);
+  e.confirmations.push(false);
+  e.get('CountryPanel').onDoneEditing(); e.render();
+  assert.match(e.confirmationMessages.at(-1), /Central.*Original/);
+  assert.deepEqual(visibleSubdivisions(e), before);
+  assert.equal(e.get('CountryPanel').data.geometry, undefined);
+  assert.equal(e.get('CountryPanel').editingCountry, 'country-a');
+  e.confirmations.push(true);
+  e.get('CountryPanel').onDoneEditing(); e.render();
+  assert.equal(visibleSubdivisions(e).length, 0);
+  await e.get('Navbar').onSave(); e.render();
+  assert.equal(e.calls.at(-1).subdivisions.region, undefined);
+  assert.deepEqual(e.calls.at(-1).edits['country-a'].geometry, rectangle(0,0,2,4));
+});
+
+test('expanding a neighbor trims subdivisions of the country losing territory', async () => {
+  const e = await borderEditor();
+  e.select('country-b');
+  e.get('CountryPanel').onEnterEditMode(); e.render();
+  e.get('CountryPanel').onSetEditMode('vertices'); e.render();
+  moveCountryVertex(e, 0, 2, 0);
+  moveCountryVertex(e, 3, 2, 4);
+  e.get('CountryPanel').onDoneEditing(); e.render();
+  await e.get('Navbar').onSave(); e.render();
+  const saved = e.calls.at(-1);
+  assertInside(saved.subdivisions.region, saved.edits['country-a'].geometry);
+  assert.ok(turf.area(turf.feature(saved.subdivisions.region.geometry)) < turf.area(turf.feature(rectangle(1,1,3,3))));
+});
+
+test('creating a country clips existing subdivisions, including a split into multiple pieces', async () => {
+  const e = await borderEditor();
+  e.get('Sidebar').onToggleAddCountry(); e.render();
+  for (const [lng, lat] of [[1.5,0], [2.5,0], [2.5,4], [1.5,4]]) {
+    e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
+  }
+  e.prompts.push('Strip'); e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+  await e.get('Navbar').onSave(); e.render();
+  const saved = e.calls.at(-1);
+  assert.equal(saved.subdivisions.region.geometry.type, 'MultiPolygon');
+  assertInside(saved.subdivisions.region, saved.edits['country-a'].geometry);
+});
+
+test('cancelling subdivision deletion during country creation leaves every country unchanged', async () => {
+  const e = await borderEditor({ region: rectangle(2.5,1,3.5,3) });
+  const beforeCountries = e.get('Source').data;
+  const beforeSubdivisions = visibleSubdivisions(e);
+  e.get('Sidebar').onToggleAddCountry(); e.render();
+  for (const [lng, lat] of [[2,0], [4,0], [4,4], [2,4]]) {
+    e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
+  }
+  e.prompts.push('New'); e.confirmations.push(false);
+  e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+  assert.deepEqual(e.get('Source').data, beforeCountries);
+  assert.deepEqual(visibleSubdivisions(e), beforeSubdivisions);
+  assert.equal(e.get('Sidebar').isAddingCountry, true);
+});
+
+test('manual absorption waits for subdivision loss confirmation before changing either country', async () => {
+  const e = await borderEditor();
+  e.get('CountryPanel').onStartAbsorb(); e.render();
+  e.confirmations.push(true, false); e.select('country-b');
+  assert.equal(e.get('Source').data.features.length, 2);
+  assert.equal(visibleSubdivisions(e).length, 1);
+  e.confirmations.push(true, true); e.select('country-b');
+  await e.get('Navbar').onSave(); e.render();
+  const saved = e.calls.at(-1);
+  assert.equal(saved.edits['country-a'].geometry, null);
+  assert.equal(saved.subdivisions.region, undefined);
+  assertInside(saved.subdivisions.neighbor, saved.edits['country-b'].geometry);
+});

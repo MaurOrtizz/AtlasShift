@@ -259,6 +259,38 @@ function App() {
     setHoveredCountry(null);
   }, []);
 
+  // Prepare both collections before committing so cancellation cannot leave a partial edit.
+  const commitCountryGeometryChanges = useCallback((updatedEdits: Record<string, CountryData>): boolean => {
+    const updatedSubdivisions = { ...subdivisions };
+    const removed: string[] = [];
+    try {
+      for (const [id, subdivision] of Object.entries(subdivisions)) {
+        const parentId = subdivision.parent_id;
+        const parentEdit = updatedEdits[parentId];
+        if (!parentEdit || parentEdit.geometry === undefined || parentEdit.geometry === countryEdits[parentId]?.geometry) continue;
+        const clipped = parentEdit.geometry === null ? null : turf.intersect(turf.featureCollection([
+          turf.feature(subdivision.geometry as Polygon | MultiPolygon),
+          turf.feature(parentEdit.geometry as Polygon | MultiPolygon),
+        ]));
+        if (clipped) updatedSubdivisions[id] = { ...subdivision, geometry: clipped.geometry };
+        else {
+          delete updatedSubdivisions[id];
+          removed.push(id);
+        }
+      }
+    } catch {
+      alert('The subdivisions could not be adjusted to the new country borders. No changes were applied; please revise the boundary and try again.');
+      return false;
+    }
+    if (removed.length && !window.confirm(
+      `These subdivisions would have no territory left inside their country and will be deleted:\n\n${removed.map(id => `${subdivisions[id].name} (${getCountryData(subdivisions[id].parent_id).name})`).join('\n')}\n\nApply the country changes?`
+    )) return false;
+    setCountryEdits(updatedEdits);
+    setSubdivisions(updatedSubdivisions);
+    if (selectedSubdivision && !Object.hasOwn(updatedSubdivisions, selectedSubdivision)) setSelectedSubdivision(null);
+    return true;
+  }, [subdivisions, countryEdits, selectedSubdivision, getCountryData]);
+
   const onClick = useCallback((e: MapLayerMouseEvent) => {
     if (e.originalEvent.detail === 2) return;
     
@@ -291,8 +323,8 @@ function App() {
       const targetFeature = turf.feature(targetGeometry as Polygon | MultiPolygon);
       const unioned = turf.union(turf.featureCollection([sourceFeature, targetFeature]));
 
-      setCountryEdits(prev => ({
-        ...prev,
+      if (!commitCountryGeometryChanges({
+        ...countryEdits,
         [absorbingCountry]: {
           ...getCountryData(absorbingCountry),
           geometry: null
@@ -301,10 +333,7 @@ function App() {
           ...getCountryData(targetName),
           geometry: unioned ? unioned.geometry : targetGeometry
         }
-      }));
-      setSubdivisions(prev => Object.fromEntries(
-        Object.entries(prev).filter(([, subdivision]) => subdivision.parent_id !== absorbingCountry)
-      ));
+      })) return;
 
       setAbsorbingCountry(null);
       setSelectedCountry(null);
@@ -415,7 +444,7 @@ function App() {
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries, isAddingCountry, isAddingSubdivisionFor, absorbingCountry, countryEdits, countriesById, selectedCountry, selectedSubdivision, subdivisions, confirmDiscardDraft, getCountryData]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry, isAddingSubdivisionFor, absorbingCountry, countryEdits, countriesById, selectedCountry, selectedSubdivision, subdivisions, confirmDiscardDraft, getCountryData, commitCountryGeometryChanges]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
@@ -549,9 +578,6 @@ function App() {
               geometry: null
             };
           });
-          setSubdivisions(prev => Object.fromEntries(
-            Object.entries(prev).filter(([, subdivision]) => !countriesToAbsorb.includes(subdivision.parent_id))
-          ));
         }
       }
 
@@ -562,7 +588,7 @@ function App() {
         properties: {}
       };
 
-      setCountryEdits(updatedEdits);
+      if (!commitCountryGeometryChanges(updatedEdits)) return;
       setIsAddingCountry(false);
       setNewCountryPoints([]);
       return;
@@ -583,7 +609,7 @@ function App() {
         [name]: geometry
       }));
     }
-  }, [isAddingSubdivisionFor, newSubdivisionPoints, getCountryGeometry, subdivisions, subdivisionsShownFor, isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData]);
+  }, [isAddingSubdivisionFor, newSubdivisionPoints, getCountryGeometry, subdivisions, subdivisionsShownFor, isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData, commitCountryGeometryChanges]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
@@ -859,10 +885,10 @@ function App() {
 
     if (geometry) {
       const newGeometry = turf.feature(geometry as Polygon | MultiPolygon);
+      const updatedEdits = { ...countryEdits };
 
       if (!allowOverlapping) {
         const newBbox = turf.bbox(newGeometry);
-        const updatedEdits = { ...countryEdits };
         const countriesToAbsorb: string[] = [];
 
         getAbsorptionCandidates(countryEdits, countriesData).forEach(({ name, geometry: otherGeometry }) => {
@@ -903,32 +929,20 @@ function App() {
               geometry: null
             };
           });
-          setSubdivisions(prev => Object.fromEntries(
-            Object.entries(prev).filter(([, subdivision]) => !countriesToAbsorb.includes(subdivision.parent_id))
-          ));
         }
 
-        updatedEdits[editingCountry] = {
-          ...getCountryData(editingCountry),
-          geometry
-        };
-
-        setCountryEdits(updatedEdits);
-      } else {
-        setCountryEdits(prev => ({
-          ...prev,
-          [editingCountry]: {
-            ...getCountryData(editingCountry),
-            geometry
-          }
-        }));
       }
+      updatedEdits[editingCountry] = {
+        ...getCountryData(editingCountry),
+        geometry
+      };
+      if (!commitCountryGeometryChanges(updatedEdits)) return;
     }
 
     setEditingCountry(null);
     setEditMode(null);
     setDrawingPoints([]);
-  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, getCountryData]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, getCountryData, commitCountryGeometryChanges]);
 
   const editingVertices = useMemo(() => {
     if (!editingCountry) return null;
