@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as world from '../src/world.ts';
+import * as turf from '@turf/turf';
 
 const require = createRequire(import.meta.url);
 const geometry = { type: 'Polygon', coordinates: [[[0,0],[2,0],[2,2],[0,0]]] };
@@ -287,6 +288,7 @@ test('loading a version 1 world migrates name-based edits before selection and s
 test('subdivisions can be added, selected, edited, deleted, and saved', async () => {
   const e = editor();
   e.select();
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
   e.get('CountryPanel').onStartSubdivision(); e.render();
   for (const [lng, lat] of [[0.2,0.2], [1,0.2], [1,1]]) {
     e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
@@ -312,6 +314,7 @@ test('subdivisions can be added, selected, edited, deleted, and saved', async ()
 test('deleting a country removes its subdivisions', async () => {
   const e = editor();
   e.select();
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
   e.get('CountryPanel').onStartSubdivision(); e.render();
   for (const [lng, lat] of [[0.2,0.2], [1,0.2], [1,1]]) {
     e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
@@ -326,4 +329,142 @@ test('deleting a country removes its subdivisions', async () => {
   e.prompts.push('Cascade'); await e.get('Navbar').onSave(); e.render();
   assert.deepEqual(e.calls[0].subdivisions, {});
   assert.equal(e.calls[0].edits['country-a'].geometry, null);
+});
+
+const firstRegion = [[0.5,0.1], [1.5,0.1], [1.5,0.4], [0.5,0.4]];
+const secondRegion = [[1,0.1], [1.8,0.1], [1.8,0.5], [1,0.5]];
+function drawSubdivision(e, points, name) {
+  e.get('SubdivisionPanel')?.onClose(); e.render();
+  if (!e.get('CountryPanel')?.isAddingSubdivision) {
+    e.select();
+    if (!e.get('CountryPanel').showSubdivisions) {
+      e.get('CountryPanel').onToggleSubdivisions(); e.render();
+    }
+    e.get('CountryPanel').onStartSubdivision(); e.render();
+  }
+  for (const [lng, lat] of points) {
+    e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
+  }
+  if (name) e.prompts.push(name);
+  e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+}
+const visibleSubdivisions = e => e.getAll('Source').find(s => s.id === 'subdivisions')?.data.features ?? [];
+const subdivisionIntersection = e => turf.intersect(turf.featureCollection(visibleSubdivisions(e)));
+
+test('overlapping OFF trims sibling subdivisions and saves the resulting boundaries', async () => {
+  const e = editor();
+  drawSubdivision(e, firstRegion, 'First');
+  const originalArea = turf.area(visibleSubdivisions(e)[0]);
+  drawSubdivision(e, secondRegion, 'Second');
+  assert.equal(visibleSubdivisions(e).length, 2);
+  assert.equal(subdivisionIntersection(e), null);
+  assert.ok(turf.area(visibleSubdivisions(e)[0]) < originalArea);
+  e.prompts.push('Trimmed'); await e.get('Navbar').onSave(); e.render();
+  const savedFeatures = Object.values(e.calls[0].subdivisions).map(s => turf.feature(s.geometry));
+  assert.equal(turf.intersect(turf.featureCollection(savedFeatures)), null);
+});
+
+test('overlapping ON permits intersections and switching OFF resolves existing ones', () => {
+  const e = editor();
+  e.get('Navbar').onToggleOverlapping(); e.render();
+  drawSubdivision(e, firstRegion, 'First');
+  drawSubdivision(e, secondRegion, 'Second');
+  assert.ok(subdivisionIntersection(e));
+  e.get('Navbar').onToggleOverlapping(); e.render();
+  assert.equal(e.get('Navbar').allowOverlapping, false);
+  assert.equal(subdivisionIntersection(e), null);
+});
+
+test('complete subdivision absorption can be cancelled without changing saved boundaries', () => {
+  const e = editor();
+  drawSubdivision(e, firstRegion, 'First');
+  const before = visibleSubdivisions(e);
+  e.confirmations.push(false);
+  drawSubdivision(e, firstRegion);
+  assert.deepEqual(visibleSubdivisions(e), before);
+  assert.equal(e.get('CountryPanel').isAddingSubdivision, true);
+  e.confirmations.push(true); e.prompts.push('Replacement');
+  e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+  assert.equal(visibleSubdivisions(e).length, 1);
+  assert.equal(visibleSubdivisions(e)[0].properties.name, 'Replacement');
+});
+
+test('cancelling absorption when switching OFF preserves the ON setting and both subdivisions', () => {
+  const e = editor();
+  e.get('Navbar').onToggleOverlapping(); e.render();
+  drawSubdivision(e, firstRegion, 'First');
+  drawSubdivision(e, firstRegion, 'Second');
+  const before = visibleSubdivisions(e);
+  e.confirmations.push(false);
+  e.get('Navbar').onToggleOverlapping(); e.render();
+  assert.equal(e.get('Navbar').allowOverlapping, true);
+  assert.deepEqual(visibleSubdivisions(e), before);
+  e.confirmations.push(true);
+  e.get('Navbar').onToggleOverlapping(); e.render();
+  assert.equal(e.get('Navbar').allowOverlapping, false);
+  assert.equal(visibleSubdivisions(e).length, 1);
+  assert.equal(visibleSubdivisions(e)[0].properties.name, 'Second');
+});
+
+test('a rejected outside subdivision clears its preview and vertices and allows a fresh drawing', async () => {
+  const e = editor();
+  drawSubdivision(e, [[10,10], [11,10], [11,11]]);
+  assert.match(e.notices.at(-1), /outside the selected country/);
+  assert.equal(e.get('CountryPanel').isAddingSubdivision, true);
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+  assert.equal(e.getAll('Source').some(s => s.id === 'new-country'), false);
+  assert.equal(e.getAll('Layer').some(l => l.id === 'new-vertices-layer'), false);
+  drawSubdivision(e, firstRegion, 'Valid');
+  assert.equal(visibleSubdivisions(e).length, 1);
+  e.prompts.push('Recovered'); assert.equal(await e.get('Navbar').onSave(), true);
+});
+
+test('subdivision visibility is opt-in per selected country and does not alter saved data', async () => {
+  const e = editor();
+  const region = { parent_id: 'country-a', name: 'Region', color: '#123456', geometry };
+  const otherCountry = { ...base.features[0], id: 'country-b' };
+  e.stored.set(10, {
+    id: 10, name: 'Visibility', schema_version: 3, edits: {},
+    base_map: { ...base, features: [...base.features, otherCountry] },
+    subdivisions: { region, other: { ...region, parent_id: 'country-b' } },
+  });
+  e.get('Navbar').onMyWorlds(); e.render();
+  await e.get('WorldsPanel').onLoad({ id: 10 }); e.render();
+  assert.equal(visibleSubdivisions(e).length, 0);
+  e.select();
+  assert.equal(e.get('CountryPanel').showSubdivisions, false);
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  assert.deepEqual(visibleSubdivisions(e).map(f => f.id), ['region']);
+  e.get('Map').onClick({ originalEvent: { detail: 1 }, features: visibleSubdivisions(e) }); e.render();
+  assert.equal(e.get('SubdivisionPanel').data.name, 'Region');
+  e.get('SubdivisionPanel').onClose(); e.render();
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  assert.equal(visibleSubdivisions(e).length, 0);
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  e.select('country-b');
+  assert.equal(visibleSubdivisions(e).length, 0);
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  assert.deepEqual(visibleSubdivisions(e).map(f => f.id), ['other']);
+  e.get('CountryPanel').onClose(); e.render();
+  assert.equal(visibleSubdivisions(e).length, 0);
+  e.select('country-b');
+  assert.equal(e.get('CountryPanel').showSubdivisions, false);
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+  await e.get('Navbar').onSave(); e.render();
+  assert.equal(Object.keys(e.calls[0].subdivisions).length, 2);
+});
+
+test('creating a subdivision while hidden keeps visibility off until explicitly enabled', () => {
+  const e = editor(); e.select();
+  e.get('CountryPanel').onStartSubdivision(); e.render();
+  for (const [lng, lat] of firstRegion) {
+    e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [], lngLat: { lng, lat } }); e.render();
+  }
+  e.prompts.push('Hidden');
+  e.get('Map').onDblClick({ preventDefault() {}, features: [] }); e.render();
+  assert.equal(e.get('CountryPanel').subdivisionCount, 1);
+  assert.equal(e.get('CountryPanel').showSubdivisions, false);
+  assert.equal(visibleSubdivisions(e).length, 0);
+  e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  assert.equal(visibleSubdivisions(e)[0].properties.name, 'Hidden');
 });

@@ -17,6 +17,8 @@ interface CountryPanelProps {
   onDoneEditing: () => void;
   isAbsorbing: boolean;
   subdivisionCount: number;
+  showSubdivisions: boolean;
+  onToggleSubdivisions: () => void;
   isAddingSubdivision: boolean;
   onStartSubdivision: () => void;
   onCancelSubdivision: () => void;
@@ -49,6 +51,8 @@ function CountryPanel({
   onDoneEditing,
   isAbsorbing,
   subdivisionCount,
+  showSubdivisions,
+  onToggleSubdivisions,
   isAddingSubdivision,
   onStartSubdivision,
   onCancelSubdivision,
@@ -134,11 +138,14 @@ function CountryPanel({
             <button onClick={onStartSubdivision} style={buttonStyle('#0891b2')}>
               Add Subdivision
             </button>
-            {subdivisionCount > 0 && (
-              <div style={{ fontSize: 13, color: '#444' }}>
-                {subdivisionCount} subdivision{subdivisionCount === 1 ? '' : 's'}
-              </div>
-            )}
+            <button
+              type="button"
+              aria-pressed={showSubdivisions}
+              onClick={onToggleSubdivisions}
+              style={buttonStyle(showSubdivisions ? '#0e7490' : '#6b7280')}
+            >
+              {showSubdivisions ? 'Hide' : 'Show'} Subdivisions ({subdivisionCount})
+            </button>
             <button onClick={onStartAbsorb} style={buttonStyle('#ea580c')}>
               Absorb Into...
             </button>

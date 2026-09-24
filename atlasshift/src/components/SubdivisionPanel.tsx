@@ -45,14 +45,14 @@ function SubdivisionPanel({ data, parentName, onChange, onClose, onDeleteSubdivi
       overflowY: 'auto',
       zIndex: 10
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+      <div style={{ position: 'relative', padding: '0 28px', textAlign: 'center' }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 12, color: '#666', fontWeight: 600 }}>SUBDIVISION</div>
           <div style={{ fontSize: 13, color: '#444', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             Inside {parentName}
           </div>
         </div>
-        <button onClick={onClose} style={{ cursor: 'pointer', border: 'none', background: 'none', fontSize: 18, color: '#666' }}>x</button>
+        <button aria-label="Close subdivision panel" onClick={onClose} style={{ position: 'absolute', right: 0, top: 0, cursor: 'pointer', border: 'none', background: 'none', fontSize: 18, color: '#666' }}>x</button>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

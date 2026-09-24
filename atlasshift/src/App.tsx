@@ -82,6 +82,22 @@ function bboxesOverlap(a: number[], b: number[]) {
   return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
 }
 
+// The incoming subdivision keeps its territory, just like a newly drawn country.
+function trimSubdivisionOverlaps(existing: Record<string, SubdivisionData>, incoming: SubdivisionData) {
+  const next = { ...existing };
+  const incomingFeature = turf.feature(incoming.geometry as Polygon | MultiPolygon);
+  const bounds = turf.bbox(incomingFeature);
+  for (const [id, subdivision] of Object.entries(existing)) {
+    if (subdivision.parent_id !== incoming.parent_id || !bboxesOverlap(bounds, turf.bbox(subdivision.geometry))) continue;
+    const difference = turf.difference(turf.featureCollection([
+      turf.feature(subdivision.geometry as Polygon | MultiPolygon), incomingFeature,
+    ]));
+    if (difference) next[id] = { ...subdivision, geometry: difference.geometry };
+    else delete next[id];
+  }
+  return next;
+}
+
 function getAbsorptionCandidates(countryEdits: Record<string, CountryData>, countriesData: FeatureCollection) {
   const candidates: { name: string; geometry: Geometry }[] = [];
   const seen = new Set<string>();
@@ -167,6 +183,7 @@ function App() {
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [selectedSubdivision, setSelectedSubdivision] = useState<string | null>(null);
+  const [subdivisionsShownFor, setSubdivisionsShownFor] = useState<string | null>(null);
   const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>(emptyEdits);
   const [subdivisions, setSubdivisions] = useState<Record<string, SubdivisionData>>(emptySubdivisions);
   const getCountryData = useCallback((id: string): CountryData => countryEdits[id] ?? {
@@ -386,6 +403,7 @@ function App() {
 
     const feature = e.features?.find(f => f.properties?.territoryId);
     if (feature?.properties?.territoryId !== selectedCountry && !confirmDiscardDraft()) return;
+    if (feature?.properties?.territoryId !== selectedCountry) setSubdivisionsShownFor(null);
     if (feature?.properties?.territoryId) {
       const name = feature.properties?.territoryId;
       setSelectedCountry(name);
@@ -407,31 +425,52 @@ function App() {
 
       const parentGeometry = getCountryGeometry(isAddingSubdivisionFor);
       if (!parentGeometry) {
+        setNewSubdivisionPoints([]);
+        setDraggingVertex(null);
         alert('The selected country has no geometry for subdivision clipping.');
         return;
       }
-
-      const name = prompt('Name your new subdivision:')?.trim();
-      if (!name) return;
-      let id: string;
-      do { id = `subdivision-${crypto.randomUUID()}`; } while (Object.hasOwn(subdivisions, id));
 
       const rawGeometry = {
         type: 'Polygon' as const,
         coordinates: [[...newSubdivisionPoints, newSubdivisionPoints[0]]]
       };
 
-      const clipped = turf.intersect(turf.featureCollection([
-        turf.feature(rawGeometry),
-        turf.feature(parentGeometry as Polygon | MultiPolygon)
-      ]));
-      if (!clipped) {
-        alert('This subdivision is outside the selected country and cannot be created.');
+      let clipped: Feature<Polygon | MultiPolygon> | null;
+      let updatedSubdivisions = subdivisions;
+      try {
+        clipped = turf.intersect(turf.featureCollection([
+          turf.feature(rawGeometry),
+          turf.feature(parentGeometry as Polygon | MultiPolygon)
+        ]));
+        if (!clipped) {
+          setNewSubdivisionPoints([]);
+          setDraggingVertex(null);
+          alert('This subdivision is outside the selected country. The drawing was cleared; draw a new boundary inside the country.');
+          return;
+        }
+        if (!allowOverlapping) {
+          updatedSubdivisions = trimSubdivisionOverlaps(subdivisions, {
+            parent_id: isAddingSubdivisionFor, name: '', color: '', geometry: clipped.geometry,
+          });
+        }
+      } catch {
+        setNewSubdivisionPoints([]);
+        setDraggingVertex(null);
+        alert('This subdivision boundary could not be processed. The drawing was cleared; please draw it again.');
         return;
       }
 
-      setSubdivisions(prev => ({
-        ...prev,
+      const absorbed = Object.keys(subdivisions).filter(id => !Object.hasOwn(updatedSubdivisions, id));
+      if (absorbed.length && !window.confirm(
+        `This action will completely absorb the following subdivisions:\n\n${absorbed.map(id => subdivisions[id].name).join('\n')}\n\nContinue?`
+      )) return;
+      const name = prompt('Name your new subdivision:')?.trim();
+      if (!name) return;
+      let id: string;
+      do { id = `subdivision-${crypto.randomUUID()}`; } while (Object.hasOwn(subdivisions, id));
+      setSubdivisions({
+        ...updatedSubdivisions,
         [id]: {
           parent_id: isAddingSubdivisionFor,
           name,
@@ -439,8 +478,8 @@ function App() {
           geometry: clipped.geometry,
           properties: {}
         }
-      }));
-      setSelectedSubdivision(id);
+      });
+      setSelectedSubdivision(subdivisionsShownFor === isAddingSubdivisionFor ? id : null);
       setSelectedCountry(isAddingSubdivisionFor);
       setIsAddingSubdivisionFor(null);
       setNewSubdivisionPoints([]);
@@ -544,7 +583,7 @@ function App() {
         [name]: geometry
       }));
     }
-  }, [isAddingSubdivisionFor, newSubdivisionPoints, getCountryGeometry, subdivisions, isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData]);
+  }, [isAddingSubdivisionFor, newSubdivisionPoints, getCountryGeometry, subdivisions, subdivisionsShownFor, isAddingCountry, newCountryPoints, countryEdits, allowOverlapping, seaPolygons, countriesById, countriesData, confirmDiscardDraft, getCountryData]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
@@ -622,6 +661,28 @@ function App() {
     setNewSubdivisionPoints([]);
   }, []);
 
+  const handleToggleOverlapping = useCallback(() => {
+    if (!allowOverlapping) {
+      setAllowOverlapping(true);
+      return;
+    }
+    try {
+      let resolved: Record<string, SubdivisionData> = {};
+      for (const [id, subdivision] of Object.entries(subdivisions)) {
+        resolved = { ...trimSubdivisionOverlaps(resolved, subdivision), [id]: subdivision };
+      }
+      const absorbed = Object.keys(subdivisions).filter(id => !Object.hasOwn(resolved, id));
+      if (absorbed.length && !window.confirm(
+        `Turning overlapping off will completely absorb the following subdivisions:\n\n${absorbed.map(id => subdivisions[id].name).join('\n')}\n\nContinue?`
+      )) return;
+      setSubdivisions(resolved);
+      if (selectedSubdivision && !Object.hasOwn(resolved, selectedSubdivision)) setSelectedSubdivision(null);
+      setAllowOverlapping(false);
+    } catch {
+      alert('Subdivision overlaps could not be resolved. Overlapping is still on and your subdivisions have not changed.');
+    }
+  }, [allowOverlapping, subdivisions, selectedSubdivision]);
+
   const handleSave = useCallback(async (): Promise<boolean> => {
     if (savingRef.current) return false;
     if (hasDraftChanges) {
@@ -660,6 +721,7 @@ function App() {
   useEffect(() => { confirmCurrentChanges.current = confirmDiscardUnsavedChanges; }, [confirmDiscardUnsavedChanges]);
 
   const resetEditing = useCallback(() => {
+    setSubdivisionsShownFor(null);
     setSelectedCountry(null);
     setSelectedSubdivision(null);
     setHoveredCountry(null);
@@ -1002,7 +1064,9 @@ function App() {
 
   const allSubdivisionsData = useMemo(() => ({
     type: 'FeatureCollection' as const,
-    features: Object.entries(subdivisions).map(([id, subdivision]) => ({
+    features: Object.entries(subdivisions)
+      .filter(([, subdivision]) => subdivision.parent_id === selectedCountry && subdivision.parent_id === subdivisionsShownFor)
+      .map(([id, subdivision]) => ({
       type: 'Feature' as const,
       id,
       properties: {
@@ -1014,7 +1078,7 @@ function App() {
       },
       geometry: subdivision.geometry,
     })),
-  }), [subdivisions]);
+  }), [subdivisions, selectedCountry, subdivisionsShownFor]);
 
   const handleExportCountries = useCallback(() => {
     if (hasDraftChanges) {
@@ -1214,7 +1278,7 @@ function App() {
           setShowWorldsPanel(prev => !prev);
         }}
         allowOverlapping={allowOverlapping}
-        onToggleOverlapping={() => setAllowOverlapping(prev => !prev)}
+        onToggleOverlapping={handleToggleOverlapping}
       />
       <Sidebar
         isAddingCountry={isAddingCountry}
@@ -1438,6 +1502,8 @@ function App() {
           onChange={handlePanelChange}
           onClose={() => {
             if (!confirmDiscardDraft()) return;
+            setSubdivisionsShownFor(null);
+            handleCancelSubdivision();
             setSelectedCountry(null);
             setEditingCountry(null);
             setEditMode(null);
@@ -1461,6 +1527,8 @@ function App() {
           onDoneEditing={handleDoneEditing}
           isAbsorbing={absorbingCountry === selectedCountry}
           subdivisionCount={Object.values(subdivisions).filter(subdivision => subdivision.parent_id === selectedCountry).length}
+          showSubdivisions={subdivisionsShownFor === selectedCountry}
+          onToggleSubdivisions={() => setSubdivisionsShownFor(prev => prev === selectedCountry ? null : selectedCountry)}
           isAddingSubdivision={isAddingSubdivisionFor === selectedCountry}
           onStartSubdivision={handleStartSubdivision}
           onCancelSubdivision={handleCancelSubdivision}

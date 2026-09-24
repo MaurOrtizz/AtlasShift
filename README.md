@@ -105,10 +105,11 @@ Open [http://localhost:5173](http://localhost:5173). The backend currently allow
 2. Select **Edit Borders → Edit Vertices**. Drag a point to move the border, click a border segment to insert a point, or right-click a vertex to remove it. Select **Done** when finished.
 3. To add territory to the selected country, use **Edit Borders → Draw Territory**, place the polygon points, and select **Done** once the shape has at least three points.
 4. To create a country, select **Add Polygon** from the toolbar, place at least three points, and double-click to finish. Enter a country name when prompted. Names can repeat; each country has its own permanent ID.
-5. To create a subdivision, select a country, choose **Add Subdivision**, place at least three points inside the country, and double-click to finish. AtlasShift clips the new subdivision to the parent country. Click a subdivision to rename, recolor, or delete it.
-6. To merge countries, select the country that will be absorbed, choose **Absorb Into...**, click the receiving country, and confirm the operation.
-7. Finish any active territory edit, then select **Save** and name the world. It can then be opened from **My Worlds**. Unsaved work is checked before importing or switching worlds; cancelling or failing a save stops that action. Closing the tab also warns about pending changes.
-8. Use **Export Countries GeoJSON** to download `countries.geojson`. **Import Countries GeoJSON** accepts a GeoJSON `FeatureCollection`; country features should use `Polygon` or `MultiPolygon` geometries and non-empty names in `properties.name`. Existing feature IDs must be unique. Missing IDs are generated during import, and numeric IDs become strings. Export preserves those IDs, so renaming a country does not change its identity.
+5. To create a subdivision, select a country, choose **Add Subdivision**, place at least three points inside the country, and double-click to finish. AtlasShift clips the new subdivision to the parent country. A drawing entirely outside the country is cleared so you can start again. With **OVERLAPPING OFF**, the new subdivision trims existing subdivisions of the same country; complete absorption requires confirmation. Switching from ON to OFF also resolves existing subdivision overlaps, with later-created regions taking priority.
+6. Subdivisions are hidden by default. Select a country and use **Show Subdivisions / Hide Subdivisions** to control their visibility, including newly created subdivisions. Changing countries or closing the country panel hides its subdivisions without deleting them. Click a visible subdivision to rename, recolor, or delete it; close its panel to return to the country controls.
+7. To merge countries, select the country that will be absorbed, choose **Absorb Into...**, click the receiving country, and confirm the operation.
+8. Finish any active territory edit, then select **Save** and name the world. It can then be opened from **My Worlds**. Unsaved work is checked before importing or switching worlds; cancelling or failing a save stops that action. Closing the tab also warns about pending changes.
+9. Use **Export Countries GeoJSON** to download `countries.geojson`. **Import Countries GeoJSON** accepts a GeoJSON `FeatureCollection`; country features should use `Polygon` or `MultiPolygon` geometries and non-empty names in `properties.name`. Existing feature IDs must be unique. Missing IDs are generated during import, and numeric IDs become strings. Export preserves those IDs, so renaming a country does not change its identity.
 
 The **Allow Overlapping** switch controls whether countries may cover the same area. When it is disabled, a new border can trim neighboring countries, so inspect the result before saving.
 
@@ -169,7 +170,7 @@ GitHub Actions runs both test suites, lints and builds the frontend, and builds 
 ## Current limitations
 
 - **Custom backgrounds:** project snapshots preserve background metadata, but `/uploads/background-image` is not implemented yet. The upload control is disabled until file storage is available.
-- **Subdivision editing:** subdivisions can be created, renamed, recolored, deleted, saved, and reloaded. Dedicated internal-border vertex editing, overlap trimming between sibling subdivisions, and subdivision GeoJSON import/export are not implemented yet.
+- **Subdivision editing:** subdivisions can be created, renamed, recolored, deleted, saved, and reloaded, with visibility controls and overlap trimming between siblings. Dedicated internal-border vertex editing and subdivision GeoJSON import/export are not implemented yet.
 - **Legacy worlds:** old saves may already contain lost geometries or lack their imported base map. Compatibility preserves their stored data without guessing which deletions were accidental.
 - **GeoJSON exchange:** export includes committed country geometries, names, colors, and sea features, but not world-level settings or background resources. Complete snapshots are stored through **Save**.
 - **External base map:** the current style uses MapTiler resources and contains a sample key. For reliable use, configure your own key in `atlasshift/src/data/BlankWorldMap.json` or replace the source with another compatible provider.
@@ -177,6 +178,6 @@ GitHub Actions runs both test suites, lints and builds the frontend, and builds 
 
 ## Roadmap
 
-Future versions of AtlasShift are planned to expand country subdivisions such as states, provinces, regions, and departments. The first version already supports creating, naming, coloring, deleting, saving, and reloading subdivisions with parent-country relationships. Next steps include direct internal-border editing, sibling-overlap management, and import/export support for subdivision datasets.
+Future versions of AtlasShift are planned to expand country subdivisions such as states, provinces, regions, and departments. The editor already supports creating, naming, coloring, deleting, saving, and reloading subdivisions with parent-country relationships, visibility controls, and sibling-overlap management. Next steps include direct internal-border editing and import/export support for subdivision datasets.
 
 Other planned improvements include stronger project persistence, complete custom-background support, and undo/redo tools for safer scenario exploration.
