@@ -2,7 +2,7 @@
 
 This directory contains the web interface for AtlasShift, an interactive political map editor for building alternate worlds. It uses React and TypeScript for the interface, MapLibre GL to render the map, and Turf.js to modify territory geometries.
 
-The editor lets users customize countries, redraw borders, create or absorb territories, draw subdivisions inside parent countries, and import or export country GeoJSON. The **My Worlds** panel communicates with the FastAPI backend to manage saved scenarios.
+The editor lets users customize countries, redraw borders, create or absorb territories, draw and reshape subdivisions inside parent countries, and import or export country GeoJSON. Subdivision borders support moving, inserting, and removing vertices, with parent-country clipping and sibling-overlap handling when applied. The **My Worlds** panel communicates with the FastAPI backend to manage saved scenarios.
 
 Countries use stable GeoJSON feature IDs independently of their display names. Subdivisions use their own stable IDs and store a `parent_id` that links them back to the country they belong to. `src/world.ts` handles ID assignment, legacy-save conversion, version 3 snapshots, subdivision validation, and GeoJSON export. The same IDs drive selection and geometry editing, so duplicate country names remain independent.
 

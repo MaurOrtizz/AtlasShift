@@ -51,7 +51,8 @@ function editor() {
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
     if (name === 'react-map-gl/maplibre') return { __esModule: true, default: 'Map', Source: 'Source', Layer: 'Layer' };
-    if (name === 'maplibre-gl' || name.endsWith('.css')) return {};
+    if (name === 'maplibre-gl') return { Point: class { constructor(x, y) { this.x = x; this.y = y; } } };
+    if (name.endsWith('.css')) return {};
     if (name.includes('countries_mid_res')) return JSON.stringify(base);
     if (name.includes('BlankWorldMap')) return {};
     if (name === './api') return { api };
@@ -472,7 +473,7 @@ test('creating a subdivision while hidden keeps visibility off until explicitly 
 const rectangle = (left, bottom, right, top) => turf.polygon([[
   [left,bottom], [right,bottom], [right,top], [left,top], [left,bottom],
 ]]).geometry;
-async function borderEditor({ region = rectangle(1,1,3,3), overlapping = false } = {}) {
+async function borderEditor({ region = rectangle(1,1,3,3), overlapping = false, extraSubdivisions = {} } = {}) {
   const e = editor();
   e.stored.set(20, {
     id: 20, name: 'Borders', schema_version: 3, edits: {}, allow_overlapping: overlapping,
@@ -483,6 +484,7 @@ async function borderEditor({ region = rectangle(1,1,3,3), overlapping = false }
     subdivisions: {
       region: { parent_id: 'country-a', name: 'Central', color: '#123456', geometry: region, properties: { note: 'Keep me' } },
       neighbor: { parent_id: 'country-b', name: 'Other', color: '#abcdef', geometry: rectangle(4.5,1,5.5,3) },
+      ...extraSubdivisions,
     },
   });
   e.get('Navbar').onMyWorlds(); e.render();
@@ -601,4 +603,147 @@ test('manual absorption waits for subdivision loss confirmation before changing 
   assert.equal(saved.edits['country-a'].geometry, null);
   assert.equal(saved.subdivisions.region, undefined);
   assertInside(saved.subdivisions.neighbor, saved.edits['country-b'].geometry);
+});
+
+function selectSubdivision(e, id = 'region') {
+  const feature = visibleSubdivisions(e).find(f => f.id === id);
+  assert.ok(feature);
+  e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [feature] }); e.render();
+}
+function editSubdivision(e) {
+  selectSubdivision(e);
+  e.get('SubdivisionPanel').onEditBorders(); e.render();
+}
+const subdivisionPreview = e => e.getAll('Source').find(s => s.id === 'editing-subdivision')?.data;
+function removeVertex(e, polygonIndex, ringIndex, vertexIndex) {
+  const vertex = e.getAll('Source').find(s => s.id === 'vertices').data.features.find(f =>
+    f.properties.polygonIndex === polygonIndex && f.properties.ringIndex === ringIndex && f.properties.vertexIndex === vertexIndex);
+  const [x,y] = vertex.geometry.coordinates;
+  e.get('Map').ref.current = { getMap: () => ({
+    getContainer: () => ({ getBoundingClientRect: () => ({ left: 0, top: 0 }) }),
+    getLayer: () => true,
+    queryRenderedFeatures: () => [{ ...vertex, layer: { id: 'vertices-layer' } }],
+    project: ([x,y]) => ({ x, y }),
+  }) };
+  e.get('div').onContextMenu({ preventDefault() {}, clientX: x, clientY: y }); e.render();
+}
+
+test('subdivision vertex edits are drafts until Done, clip to the parent, and survive reload', async () => {
+  const e = await borderEditor();
+  editSubdivision(e);
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+  assert.equal(e.getAll('Source').find(s => s.id === 'vertices').data.features.length, 4);
+  moveCountryVertex(e, 1, 5, 1);
+  moveCountryVertex(e, 2, 5, 3);
+  assert.equal(e.get('Navbar').hasUnsavedChanges, true);
+  assert.equal(await e.get('Navbar').onSave(), false);
+  assert.match(e.notices.at(-1), /Finish the territory/);
+  assert.deepEqual(e.get('SubdivisionPanel').data.geometry, rectangle(1,1,3,3));
+  e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.equal(subdivisionPreview(e), undefined);
+  assertInside(e.get('SubdivisionPanel').data, rectangle(0,0,4,4));
+  assert.equal(e.get('SubdivisionPanel').data.geometry.coordinates[0].some(p => p[0] === 4), true);
+  await e.get('Navbar').onSave(); e.render();
+  const saved = e.calls.at(-1);
+  assert.deepEqual(saved.edits, {});
+  assert.equal(saved.subdivisions.region.color, '#123456');
+  assert.deepEqual(saved.subdivisions.region.properties, { note: 'Keep me' });
+  e.get('Navbar').onMyWorlds(); e.render();
+  await e.get('WorldsPanel').onLoad({ id: 20 }); e.render();
+  e.select(); e.get('CountryPanel').onToggleSubdivisions(); e.render();
+  assert.deepEqual(visibleSubdivisions(e)[0].geometry, saved.subdivisions.region.geometry);
+});
+
+test('border clicks insert vertices; right-click removes them but preserves closed triangles', async () => {
+  const e = await borderEditor(); editSubdivision(e);
+  e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [{ layer: { id: 'editing-subdivision-border' } }], lngLat: { lng: 2, lat: 1 } }); e.render();
+  assert.deepEqual(subdivisionPreview(e).geometry.coordinates[0][1], [2,1]);
+  assert.equal(subdivisionPreview(e).geometry.coordinates[0].length, 6);
+  removeVertex(e, 0, 0, 1);
+  assert.equal(subdivisionPreview(e).geometry.coordinates[0].length, 5);
+  removeVertex(e, 0, 0, 0);
+  const triangle = subdivisionPreview(e).geometry.coordinates[0];
+  assert.equal(triangle.length, 4);
+  assert.deepEqual(triangle[0], triangle.at(-1));
+  removeVertex(e, 0, 0, 0);
+  assert.deepEqual(subdivisionPreview(e).geometry.coordinates[0], triangle);
+  e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.equal(e.get('SubdivisionPanel').isEditing, false);
+});
+
+test('subdivision editing handles a hole in a multipolygon without changing its other island', async () => {
+  const outer = rectangle(0.2,0.2,2,2).coordinates[0];
+  const hole = rectangle(0.5,0.5,1,1).coordinates[0].toReversed();
+  const island = rectangle(3,3,3.5,3.5).coordinates;
+  const region = { type: 'MultiPolygon', coordinates: [[outer, hole], island] };
+  const e = await borderEditor({ region }); editSubdivision(e);
+  e.get('Map').onClick({ originalEvent: { detail: 1 }, features: [{ layer: { id: 'editing-subdivision-border' } }], lngLat: { lng: 0.5, lat: 0.75 } }); e.render();
+  assert.equal(subdivisionPreview(e).geometry.coordinates[0][1].length, 6);
+  assert.deepEqual(subdivisionPreview(e).geometry.coordinates[1], island);
+  removeVertex(e, 0, 1, 1);
+  e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.equal(e.get('SubdivisionPanel').isEditing, false);
+  assert.equal(e.get('SubdivisionPanel').data.geometry.type, 'MultiPolygon');
+  assert.equal(e.get('SubdivisionPanel').data.geometry.coordinates[0].length, 2);
+});
+
+test('Cancel restores the original subdivision and closing or switching selection protects dirty drafts', async () => {
+  const e = await borderEditor(); editSubdivision(e);
+  moveCountryVertex(e, 1, 3.5, 1);
+  e.confirmations.push(false); e.get('SubdivisionPanel').onClose(); e.render();
+  assert.ok(subdivisionPreview(e));
+  e.confirmations.push(false); e.select();
+  assert.ok(subdivisionPreview(e));
+  e.get('SubdivisionPanel').onCancelEditing(); e.render();
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+  assert.deepEqual(e.get('SubdivisionPanel').data.geometry, rectangle(1,1,3,3));
+  e.get('SubdivisionPanel').onEditBorders(); e.render();
+  moveCountryVertex(e, 1, 3.5, 1);
+  e.confirmations.push(true); e.get('SubdivisionPanel').onClose(); e.render();
+  assert.equal(subdivisionPreview(e), undefined);
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+});
+
+test('invalid edits cannot replace a subdivision, and an entirely outside boundary resets the draft', async () => {
+  const e = await borderEditor(); editSubdivision(e);
+  moveCountryVertex(e, 1, 3, 3);
+  moveCountryVertex(e, 2, 3, 1);
+  e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.match(e.get('SubdivisionPanel').editError, /crosses itself|invalid/);
+  assert.deepEqual(e.get('SubdivisionPanel').data.geometry, rectangle(1,1,3,3));
+  e.get('SubdivisionPanel').onCancelEditing(); e.render();
+  e.get('SubdivisionPanel').onEditBorders(); e.render();
+  for (const [index, lng, lat] of [[0,10,10], [1,12,10], [2,12,12], [3,10,12]]) moveCountryVertex(e, index, lng, lat);
+  e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.match(e.get('SubdivisionPanel').editError, /outside.*restored/);
+  assert.deepEqual(subdivisionPreview(e).geometry, rectangle(1,1,3,3));
+  assert.equal(e.get('Navbar').hasUnsavedChanges, false);
+});
+
+for (const overlapping of [false, true]) {
+  test(`editing a subdivision respects overlapping ${overlapping} and never trims itself`, async () => {
+    const sibling = { parent_id: 'country-a', name: 'Sibling', color: '#888888', geometry: rectangle(2,1,3,3) };
+    const e = await borderEditor({ region: rectangle(0.5,1,1.5,3), overlapping, extraSubdivisions: { sibling } });
+    editSubdivision(e);
+    moveCountryVertex(e, 1, 2.5, 1); moveCountryVertex(e, 2, 2.5, 3);
+    e.get('SubdivisionPanel').onDoneEditing(); e.render();
+    const intersection = turf.intersect(turf.featureCollection(visibleSubdivisions(e)));
+    assert.equal(Boolean(intersection), overlapping);
+    assert.deepEqual(e.get('SubdivisionPanel').data.geometry, rectangle(0.5,1,2.5,3));
+    assert.equal(visibleSubdivisions(e).length, 2);
+  });
+}
+
+test('full sibling absorption can be rejected without applying any part of the subdivision edit', async () => {
+  const sibling = { parent_id: 'country-a', name: 'Sibling', color: '#888888', geometry: rectangle(2,1,3,3) };
+  const e = await borderEditor({ region: rectangle(0.5,1,1.5,3), extraSubdivisions: { sibling } });
+  editSubdivision(e);
+  moveCountryVertex(e, 1, 3.5, 1); moveCountryVertex(e, 2, 3.5, 3);
+  e.confirmations.push(false); e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.equal(e.get('SubdivisionPanel').isEditing, true);
+  assert.deepEqual(e.get('SubdivisionPanel').data.geometry, rectangle(0.5,1,1.5,3));
+  assert.deepEqual(visibleSubdivisions(e)[0].geometry, sibling.geometry);
+  e.confirmations.push(true); e.get('SubdivisionPanel').onDoneEditing(); e.render();
+  assert.equal(visibleSubdivisions(e).length, 1);
+  assert.equal(visibleSubdivisions(e)[0].id, 'region');
 });

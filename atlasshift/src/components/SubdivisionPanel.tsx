@@ -11,6 +11,11 @@ interface SubdivisionPanelProps {
   onChange: (data: SubdivisionData) => void;
   onClose: () => void;
   onDeleteSubdivision: () => void;
+  isEditing: boolean;
+  editError: string;
+  onEditBorders: () => void;
+  onDoneEditing: () => void;
+  onCancelEditing: () => void;
 }
 
 const buttonStyle = (bg: string) => ({
@@ -24,7 +29,7 @@ const buttonStyle = (bg: string) => ({
   fontFamily: 'sans-serif'
 });
 
-function SubdivisionPanel({ data, parentName, onChange, onClose, onDeleteSubdivision }: SubdivisionPanelProps) {
+function SubdivisionPanel({ data, parentName, onChange, onClose, onDeleteSubdivision, isEditing, editError, onEditBorders, onDoneEditing, onCancelEditing }: SubdivisionPanelProps) {
   const [localColor, setLocalColor] = useState(data.color);
 
   return (
@@ -84,9 +89,22 @@ function SubdivisionPanel({ data, parentName, onChange, onClose, onDeleteSubdivi
         </div>
       </div>
 
-      <button onClick={onDeleteSubdivision} style={buttonStyle('#dc2626')}>
-        Delete Subdivision
-      </button>
+      {isEditing ? (
+        <>
+          <p style={{ fontSize: 13, color: '#444', margin: 0 }}>
+            Drag a vertex to move it, click a border to add one, or right-click a vertex to remove it.
+            Select Done to fit the boundary inside {parentName} and apply the overlap setting.
+          </p>
+          {editError && <p role="alert" style={{ fontSize: 13, color: '#b91c1c', margin: 0 }}>{editError}</p>}
+          <button onClick={onDoneEditing} style={buttonStyle('#16a34a')}>Done</button>
+          <button onClick={onCancelEditing} style={buttonStyle('#6b7280')}>Cancel Border Edit</button>
+        </>
+      ) : (
+        <>
+          <button onClick={onEditBorders} style={buttonStyle('#4f46e5')}>Edit Borders</button>
+          <button onClick={onDeleteSubdivision} style={buttonStyle('#dc2626')}>Delete Subdivision</button>
+        </>
+      )}
     </div>
   );
 }
